@@ -1,0 +1,21 @@
+# SPEAR windy viewer + SPEAK chat (FastAPI, ArrayLake/Icechunk data access)
+fastapi>=0.115
+uvicorn[standard]>=0.30
+requests>=2.32
+numpy>=2.0
+xarray>=2024.7
+zarr>=3.0
+icechunk>=1.0
+arraylake>=1.0
+python-dotenv>=1.0
+matplotlib>=3.9
+netCDF4>=1.7
+
+# RAG service (SPEAK document retrieval) — the heavy part; the viewer runs
+# fine without it (SPEAK just loses publication citations).
+pydantic>=2.7
+python-multipart>=0.0.9
+chromadb>=1.0
+langchain-chroma>=0.2
+langchain-huggingface>=0.1
+sentence-transformers>=3.0

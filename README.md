@@ -1,0 +1,80 @@
+# SPEAR Windy Viewer
+
+A Windy.com-style interactive viewer for the NOAA GFDL **SPEAR-MED large
+ensemble**, streaming data on demand from the public ArrayLake/Icechunk store
+(`GFDL/noaa-gfdl-spear-large-ensembles-pds`) — no local data files.
+
+**Features**: 16 monthly variables (atmosphere incl. pressure levels, ocean
+SST) · ensemble member / mean / spread / anomaly statistics · A−B compare
+mode · wind particle animation · rotatable 3-D globe view · virtual stations
+with time-series extraction and merged plots · year playback · value
+filtering · unit conversion · NetCDF/CSV downloads with full source
+metadata · toggleable graticule · **SPEAK**, a rate-limited RAG chatbot
+(Gemini with Claude fallback) that sees the on-screen selection statistics
+(never raw grids).
+
+## Layout
+
+```
+windy_viewer/    FastAPI server (port 8601) + static Leaflet frontend
+rag-service/     document-retrieval API for SPEAK (port 8002, internal)
+                 chroma_db/ = pre-built vector index of GFDL/SPEAR papers
+requirements.txt one environment for both services
+Containerfile    podman/docker build
+```
+
+The viewer auto-starts the RAG service beside itself. Without the RAG
+service (or without an LLM key) everything still works — SPEAK degrades
+gracefully or stays hidden.
+
+## Run locally
+
+```bash
+python -m venv .venv && . .venv/bin/activate   # or conda
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+cp .env.example .env                            # fill in tokens
+python windy_viewer/server.py                   # http://localhost:8601
+```
+
+## Run with podman
+
+```bash
+podman build -t spear-windy .
+podman run --rm -p 8601:8601 --env-file .env spear-windy
+```
+
+Optional: persist the LRU field cache across restarts
+
+```bash
+podman run --rm -p 8601:8601 --env-file .env \
+  -v spear-windy-cache:/app/windy_viewer/data spear-windy
+```
+
+## Deploy notes (AWS or similar)
+
+- Needs outbound HTTPS to ArrayLake/S3 (data), Esri/CARTO (basemap tiles are
+  fetched by the *browser*, not the server), and the LLM APIs.
+- `VIEWER_HOST=0.0.0.0` is set in the image; put a TLS proxy (ALB, nginx,
+  Caddy) in front for public exposure.
+- `VIEWER_DISK_CACHE=0` for fully stateless replicas, or mount a volume and
+  set `VIEWER_CACHE_MAX_GB` (default 10) — the cache is selection-keyed and
+  safe to share.
+- Chat abuse limits are on by default (per-IP and global daily caps); tune
+  via the `CHAT_*` vars in `.env.example`.
+- RAM: ~2 GB is comfortable (embedding model + field buffers).
+
+## Secrets
+
+`ARRAYLAKE_TOKEN` (required), `GEMINI_API_KEY` / `ANTHROPIC_API_KEY`
+(optional, enables SPEAK). Loaded from `.env` at the repo root — which is
+git-ignored; only `.env.example` is committed.
+
+## Provenance
+
+Data: NOAA GFDL SPEAR large ensembles public dataset
+(https://noaa-gfdl-spear-large-ensembles-pds.s3.amazonaws.com). Model:
+Delworth et al. (2020), doi:10.1029/2019MS001895. Basemap © CARTO/OSM,
+labels © Esri. Borders/coastlines: Natural Earth (vendored in
+`windy_viewer/static/geo/`). The RAG index is built from published GFDL
+papers; ingestion tooling lives in the parent project, not this repo.

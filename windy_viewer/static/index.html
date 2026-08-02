@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SPEAR-MED Viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<link rel="stylesheet" href="style.css?v=8" />
+</head>
+<body>
+<div id="map"></div>
+
+<div id="load-overlay" hidden>
+  <div class="load-box">
+    <div class="load-spinner"></div>
+    <div class="load-title" id="load-title">Loading&hellip;</div>
+    <div class="load-pct" id="load-pct">0%</div>
+    <div class="load-note" id="load-note"></div>
+    <button type="button" id="load-cancel" class="load-cancel" hidden>Cancel</button>
+  </div>
+</div>
+
+<div id="globe-view" hidden>
+  <canvas id="globe-canvas"></canvas>
+  <canvas id="globe-particles"></canvas>
+  <div id="globe-pins"></div>
+  <div class="globe-hint">Drag to rotate &middot; scroll to zoom &middot; Ctrl+click to add or remove a station</div>
+</div>
+
+<button type="button" id="globe-btn" class="globe-btn" title="Experimental: view the field on a rotatable 3-D globe">Globe</button>
+<div id="grat-box" class="grat-box">
+  <label><input type="checkbox" id="grat-lat" checked /> Latitude lines</label>
+  <label><input type="checkbox" id="grat-lon" checked /> Longitude lines</label>
+</div>
+<button type="button" id="rotate-btn" class="globe-btn rotate-btn" hidden title="Slowly spin the globe">Start Rotation</button>
+<div id="globe-note" class="globe-note" hidden>Ctrl+click the globe to place or remove a virtual station</div>
+
+<a class="data-access"
+   href="https://noaa-gfdl-spear-large-ensembles-pds.s3.amazonaws.com/index.html#SPEAR/GFDL-LARGE-ENSEMBLES/CMIP/NOAA-GFDL/GFDL-SPEAR-MED/"
+   target="_blank" rel="noopener"
+   title="Browse the public NOAA GFDL SPEAR large-ensemble S3 bucket">Access SPEAR Data</a>
+
+<div class="play-bar">
+  <button type="button" id="play-btn" class="play-btn" title="Animate 12 months from the selected date">&#9654; Play year</button>
+  <button type="button" id="continue-btn" class="play-btn" hidden title="Resume the paused animation">&#9654; Continue</button>
+  <div id="play-timeline" class="play-timeline" hidden></div>
+</div>
+
+<button type="button" id="merge-plots" class="merge-plots" hidden>Merge Plots</button>
+<button type="button" id="clear-pins" class="clear-pins" hidden>&#10005;&nbsp;Clear all points</button>
+
+<button type="button" id="ask-bubble" class="ask-bubble">Ask SPEAK<span class="info-i" id="ask-info">&#9432;</span></button>
+
+<div id="chat-panel" class="chat-panel" hidden>
+  <div class="chat-header" id="chat-header">
+    <span class="chat-title">Ask SPEAK <span class="info-i" id="ask-info-2">&#9432;</span></span>
+    <span class="chat-header-btns">
+      <button type="button" id="chat-max" title="Expand / shrink">&#x26F6;</button>
+      <button type="button" id="chat-min" title="Minimize">&#8213;</button>
+      <button type="button" id="chat-close" title="Close">&#10005;</button>
+    </span>
+  </div>
+  <div class="chat-messages" id="chat-messages">
+    <div class="chat-msg bot">Hi! Ask me about the data on screen, comparisons, the SPEAR model, or its variables. I can see the current selection, its statistics, and any virtual stations placed.</div>
+  </div>
+  <form class="chat-input" id="chat-form">
+    <textarea id="chat-text" rows="2" placeholder="Ask about what you see&hellip;"></textarea>
+    <button type="submit" id="chat-send" title="Send">&#10148;</button>
+  </form>
+</div>
+
+<div class="panel" id="panel">
+  <div class="panel-title"><a class="brand-link" href="https://www.gfdl.noaa.gov/spear/" target="_blank" rel="noopener" title="Open the NOAA GFDL SPEAR homepage">SPEAR-MED</a> <span class="sub">GFDL large ensemble · v29</span></div>
+
+  <div class="row row-col">
+    <span class="group-hint" title="GFDL AM4.0, 0.5&deg; Resolution">Atmospheric (Monthly)</span>
+    <div class="seg" id="var-seg-sfc"></div>
+    <span class="subgroup-title">Pressure levels</span>
+    <div class="row plev-inline">
+      <span>Level</span>
+      <div class="dropdown">
+        <button type="button" class="dd-btn" id="plev-btn"></button>
+        <div class="dd-list" id="plev-list" hidden></div>
+      </div>
+    </div>
+    <div class="seg" id="var-seg-plev"></div>
+  </div>
+
+  <div class="row row-col">
+    <span class="group-hint" title="GFDL MOM6, 1.0&deg; Resolution">Ocean (Monthly)</span>
+    <div class="seg" id="var-seg-ocean"></div>
+  </div>
+
+  <div class="row row-col">
+    <span>Units</span>
+    <div class="seg" id="unit-seg"></div>
+  </div>
+
+  <div class="row row-col">
+    <span>Experimental Scenario</span>
+    <div class="seg" id="exp-seg"></div>
+  </div>
+
+  <div class="row">
+    <span>Member</span>
+    <div class="dropdown">
+      <button type="button" class="dd-btn" id="member-btn"></button>
+      <div class="dd-list" id="member-list" hidden></div>
+    </div>
+  </div>
+
+  <div class="row row-col">
+    <span>Statistic</span>
+    <div class="seg" id="stat-seg"></div>
+  </div>
+
+  <div class="row">
+    <span>Month <span class="info-i" id="month-info-a">&#9432;</span></span>
+    <div class="month-controls">
+      <button id="prev-month" title="Previous month">&#8249;</button>
+      <input type="month" id="month-input" />
+      <button id="next-month" title="Next month">&#8250;</button>
+    </div>
+  </div>
+
+  <label class="row">
+    <span>Compare (A &minus; B)</span>
+    <input type="checkbox" id="compare-toggle" />
+  </label>
+
+  <div id="compare-block" hidden>
+    <div class="compare-title">Selection B</div>
+
+    <div class="row row-col">
+      <span>Experimental Scenario</span>
+      <div class="seg" id="exp-seg-b"></div>
+    </div>
+
+    <div class="row">
+      <span>Member</span>
+      <div class="dropdown">
+        <button type="button" class="dd-btn" id="member-btn-b"></button>
+        <div class="dd-list" id="member-list-b" hidden></div>
+      </div>
+    </div>
+
+    <div class="row row-col">
+      <span>Statistic</span>
+      <div class="seg" id="stat-seg-b"></div>
+    </div>
+
+    <div class="row">
+      <span>Month <span class="info-i" id="month-info-b">&#9432;</span></span>
+      <div class="month-controls">
+        <button id="prev-month-b" title="Previous month">&#8249;</button>
+        <input type="month" id="month-input-b" />
+        <button id="next-month-b" title="Next month">&#8250;</button>
+      </div>
+    </div>
+  </div>
+
+  <label class="row">
+    <span>Opacity</span>
+    <input type="range" id="opacity" min="0" max="100" value="100" />
+  </label>
+
+  <label class="row">
+    <span>Wind animation</span>
+    <input type="checkbox" id="particles-toggle" checked />
+  </label>
+
+  <div class="row">
+    <span>Download</span>
+    <div class="dl-buttons">
+      <button type="button" id="dl-nc" title="NetCDF with full metadata">&#8595; NetCDF</button>
+      <button type="button" id="dl-csv" title="CSV with metadata header">&#8595; CSV</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="legend-bar" id="legend-bar">
+      <canvas id="legend-canvas" width="240" height="12"></canvas>
+      <div class="legend-dim" id="legend-dim-lo"></div>
+      <div class="legend-dim" id="legend-dim-hi"></div>
+      <div class="legend-handle" id="legend-handle-lo" title="Drag to set lower bound"></div>
+      <div class="legend-handle" id="legend-handle-hi" title="Drag to set upper bound"></div>
+    </div>
+    <div class="legend-ticks" id="legend-ticks"></div>
+    <div class="legend-units" id="legend-units"></div>
+    <div class="filter-title">Filter Values</div>
+    <div class="filter-row">
+      <label>Above <input type="number" id="filter-lo" step="any" placeholder="&mdash;" /></label>
+      <label>Below <input type="number" id="filter-hi" step="any" placeholder="&mdash;" /></label>
+      <button type="button" id="filter-clear" title="Clear filter">&#10005;</button>
+    </div>
+  </div>
+
+  <div class="status" id="status">Loading&hellip;</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="app.js?v=29"></script>
+</body>
+</html>

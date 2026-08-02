@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+windy_viewer/data/
+*.log
+.DS_Store
