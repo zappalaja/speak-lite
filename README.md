@@ -76,5 +76,7 @@ Data: NOAA GFDL SPEAR large ensembles public dataset
 (https://noaa-gfdl-spear-large-ensembles-pds.s3.amazonaws.com). Model:
 Delworth et al. (2020), doi:10.1029/2019MS001895. Basemap © CARTO/OSM,
 labels © Esri. Borders/coastlines: Natural Earth (vendored in
-`windy_viewer/static/geo/`). The RAG index is built from published GFDL
-papers; ingestion tooling lives in the parent project, not this repo.
+`windy_viewer/static/geo/`). The RAG index (`rag-service/chroma_db`) is
+built from published GFDL papers (largely CC BY 4.0 AGU/JAMES articles);
+the index stores text chunks of those papers for retrieval. Paper source
+files and ingestion tooling live in the parent project, not this repo.

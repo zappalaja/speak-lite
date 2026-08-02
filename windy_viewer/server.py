@@ -249,7 +249,6 @@ def _ensure_rag_service():
     env.setdefault("CHROMA_PERSIST_DIR", str(RAG_DIR / "chroma_db"))
     env.setdefault("CHROMA_COLLECTION", "nougat_merged")
     env.setdefault("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-    env.setdefault("MERGED_MD_DIR", str(RAG_DIR / "nougat_merged_md"))
     env.setdefault("CODE_SNIPPETS_DIR", str(RAG_DIR / "code_snippets"))
     log = open(BASE_DIR / "data" / "rag.log", "ab")
     _rag_proc = subprocess.Popen(
