@@ -1544,6 +1544,21 @@ function showHeavyOverlay(seq, kind) {
   }, 250);
 }
 
+// Percent-free overlay for plain (non-statistic) loads: a raw field can
+// still take seconds on a cache miss, and a greyed screen with a spinner
+// beats looking frozen. Shares the heavyOverlay delay/seq machinery.
+function showPlainOverlay(seq) {
+  heavyOverlay.seq = seq;
+  heavyOverlay.kind = null; // no percent estimate, no EMA timing update
+  heavyOverlay.t0 = performance.now();
+  el("load-overlay").hidden = false;
+  el("load-title").textContent = `Loading ${meta.variables[state.var].label}…`;
+  el("load-pct").textContent = "";
+  el("load-note").innerHTML =
+    "Fetching this selection from the cloud data store.<br>" +
+    "Repeat selections are cached and load instantly.";
+}
+
 function hideHeavyOverlay(seq, success) {
   if (heavyOverlay.seq !== seq) return; // a newer load owns the overlay
   clearTimeout(heavyOverlay.delay);
@@ -1554,7 +1569,7 @@ function hideHeavyOverlay(seq, success) {
   }
   if (!el("load-overlay").hidden) {
     const secs = (performance.now() - heavyOverlay.t0) / 1000;
-    if (success && secs > 2) {
+    if (success && secs > 2 && heavyOverlay.kind) {
       // exponential moving average keeps the estimate adaptive
       const key = `heavyLoadSecs_${heavyOverlay.kind}`;
       const prev = +(localStorage.getItem(key) || secs);
@@ -1597,8 +1612,11 @@ async function loadField() {
   let ok = false;
   if (heavy) {
     heavyOverlay.delay = setTimeout(() => showHeavyOverlay(seq, heavyKind), 700);
-    heavyOverlay.seq = seq;
+  } else {
+    // plain loads get a percent-free overlay if they turn out slow
+    heavyOverlay.delay = setTimeout(() => showPlainOverlay(seq), 700);
   }
+  heavyOverlay.seq = seq;
   try {
     if (state.compare) {
       const selB = {
@@ -1672,7 +1690,7 @@ async function loadField() {
     if (seq === loadSeq) setStatus(String(err.message || err), true);
   } finally {
     clearInterval(loadTimer);
-    if (heavy) hideHeavyOverlay(seq, ok);
+    hideHeavyOverlay(seq, ok);
   }
 }
 
