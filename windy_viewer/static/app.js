@@ -1552,7 +1552,7 @@ function showPlainOverlay(seq) {
   heavyOverlay.kind = null; // no percent estimate, no EMA timing update
   heavyOverlay.t0 = performance.now();
   el("load-overlay").hidden = false;
-  el("load-title").textContent = `Loading ${meta.variables[state.var].label}…`;
+  el("load-title").textContent = `Loading ${meta.variables[state.var].long}…`;
   el("load-pct").textContent = "";
   el("load-note").innerHTML =
     "Fetching this selection from the cloud data store.<br>" +
