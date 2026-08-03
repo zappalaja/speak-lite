@@ -1480,9 +1480,9 @@ map.on("click", (e) => {
     addPinnedPoint(e.latlng);
     return;
   }
-  lastClickLatLng = e.latlng;
-  coordEditIdx = null;
-  readoutPopup.setLatLng(e.latlng).setContent(readoutContent(e.latlng, true, -1)).openOn(map);
+  // Once stations exist, plain clicks are inert: further stations are
+  // Ctrl+click only. (The old un-numbered ad-hoc readout popup looked
+  // like a rogue station once it grew the time-series section.)
 });
 
 // -------------------------------------------------------- data loading
