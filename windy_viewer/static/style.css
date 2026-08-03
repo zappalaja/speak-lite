@@ -1099,7 +1099,26 @@ html, body {
   border: 1px solid var(--border);
   border-bottom-left-radius: 3px;
 }
-.chat-msg.typing { color: var(--muted); font-style: italic; }
+/* SPEAK "thinking" indicator: three dots bouncing in succession */
+.chat-msg.typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 12px 14px;
+}
+.typing-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: typing-bounce 1.2s infinite ease-in-out;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-6px); opacity: 1; }
+}
 .chat-msg a { color: #7ab4f0; }
 .chat-msg.error { color: #e66767; }
 

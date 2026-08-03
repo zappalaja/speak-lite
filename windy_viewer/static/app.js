@@ -3558,7 +3558,9 @@ async function sendChat(text) {
   el("chat-send").disabled = true;
   chat.messages.push({ role: "user", content: text });
   chatEl("user", text);
-  const typing = chatEl("bot typing", "thinking…");
+  const typing = chatEl("bot typing", "");
+  typing.innerHTML =
+    '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
   try {
     const resp = await fetch("/api/chat", {
       method: "POST",
