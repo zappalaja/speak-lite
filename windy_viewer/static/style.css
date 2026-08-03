@@ -6,6 +6,23 @@
   --muted: #898781;
   --border: rgba(255, 255, 255, 0.10);
   --accent: #3987e5;
+  /* One knob for the size of ALL UI chrome, applied identically for every
+     user regardless of display or browser zoom. 0.8 = the reference look.
+     The map/globe canvases are deliberately NOT scaled (Leaflet click
+     coordinates break under CSS zoom); they fill the screen either way. */
+  --ui-scale: 0.8;
+}
+
+/* fixed chrome: panel, floating buttons/bars, overlays */
+.panel, .play-bar, .grat-box, .globe-btn, .globe-note, .data-access,
+.ask-bubble, .merge-plots, .clear-pins, .load-box, .globe-hint {
+  zoom: var(--ui-scale);
+}
+/* map/globe-anchored cards: scale the CONTENT, not the positioned box,
+   so Leaflet/projection anchoring stays exact */
+.leaflet-tooltip.pin-tip > *,
+.globe-pin-card > * {
+  zoom: var(--ui-scale);
 }
 
 * { box-sizing: border-box; }
