@@ -63,6 +63,12 @@ html, body {
      100vh minus room for the data-access box */
   max-height: calc(100vh / var(--ui-scale) - 90px);
   overflow-y: auto;
+  /* when the panel does scroll (e.g. compare mode), keep it tidy: no
+     horizontal bar, and a slim scrollbar so content isn't squeezed into
+     wrapping by the default ~15px one */
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
   padding: 14px 16px;
   /* near-opaque, no backdrop-filter: filtered layers rasterize separately
      and visibly soften the text they contain */
@@ -70,6 +76,12 @@ html, body {
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+.panel::-webkit-scrollbar { width: 7px; }
+.panel::-webkit-scrollbar-track { background: transparent; }
+.panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
 }
 
 .panel-title {
