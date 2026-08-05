@@ -707,6 +707,10 @@ html, body {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* fixed elements shrink-to-fit against the space right of their left
+     anchor (half the viewport here) — on narrow displays that clamped the
+     bar and compressed the month cells. Always size to content instead. */
+  width: max-content;
 }
 .play-timeline {
   display: flex;
@@ -726,6 +730,8 @@ html, body {
   text-align: center;
   cursor: pointer;
   user-select: none;
+  flex-shrink: 0; /* month cells never compress */
+  white-space: nowrap;
 }
 .play-timeline span small {
   display: block;
