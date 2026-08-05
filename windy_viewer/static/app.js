@@ -1852,11 +1852,25 @@ function memberBtnState(btn, stat, member) {
     stat === "spread" ? "ensemble spread (30)" : member;
 }
 
+// When the panel overflows (e.g. compare mode), widen it by the MEASURED
+// scrollbar width so the content column keeps its exact size and nothing
+// reflows. Overlay scrollbars (some platforms) measure 0 — no change.
+function updatePanelScrollPad() {
+  const p = el("panel");
+  p.style.width = ""; // reset to the base 280px before measuring
+  if (p.scrollHeight > p.clientHeight + 1) {
+    const sw = p.offsetWidth - p.clientWidth - 2; // 2 = left+right borders
+    if (sw > 0) p.style.width = `${280 + sw}px`;
+  }
+}
+window.addEventListener("resize", updatePanelScrollPad);
+
 function updateControlStates() {
   memberBtnState(el("member-btn"), state.stat, state.member);
   memberBtnState(el("member-btn-b"), state.b.stat, state.b.member);
   el("compare-block").hidden = !state.compare;
   el("particles-toggle").disabled = state.compare;
+  requestAnimationFrame(updatePanelScrollPad); // after the block shows/hides
   const play = el("play-btn");
   play.disabled = state.compare;
   play.title = state.compare
