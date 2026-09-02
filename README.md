@@ -67,7 +67,10 @@ podman run --rm -p 8601:8601 --env-file .env \
 ## Secrets
 
 `ARRAYLAKE_TOKEN` (required), `GEMINI_API_KEY` / `ANTHROPIC_API_KEY`
-(optional, enables SPEAK). Loaded from `.env` at the repo root — which is
+(optional, enables SPEAK), `CARTO_API_KEY` (optional; without it CARTO
+watermarks the basemap tiles — get a free key at
+https://carto.com/basemaps/apikey/ and register your site's domain with it;
+the key is served to the browser via `/config.js`). Loaded from `.env` at the repo root — which is
 git-ignored; only `.env.example` is committed.
 
 ## Provenance

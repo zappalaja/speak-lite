@@ -449,12 +449,21 @@ map.getPane("borders").style.pointerEvents = "none";
 map.getPane("particles").style.pointerEvents = "none";
 map.getPane("labels").style.pointerEvents = "none";
 
-L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
-  attribution:
-    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
-    '&copy; <a href="https://carto.com/attributions">CARTO</a> · SPEAR-MED (NOAA GFDL)',
-  subdomains: "abcd",
-}).addTo(map);
+// Key comes from /config.js (CARTO_API_KEY in .env); tiles are watermarked
+// "API key required" without it.
+const cartoKey = (window.SPEAR_CONFIG && window.SPEAR_CONFIG.cartoApiKey) || "";
+if (!cartoKey) console.warn("CARTO_API_KEY not set: basemap tiles will be watermarked");
+L.tileLayer(
+  "https://{s}.basemaps.cartocdn.com/rastertiles/dark_nolabels/{z}/{x}/{y}{r}.png" +
+    (cartoKey ? "?key=" + encodeURIComponent(cartoKey) : ""),
+  {
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
+      '&copy; <a href="https://carto.com/attributions">CARTO</a> · SPEAR-MED (NOAA GFDL)',
+    subdomains: "abcd",
+    maxZoom: 20,
+  }
+).addTo(map);
 
 // Place labels above the data so geography stays readable through the
 // field. Esri's Dark Gray Reference layer uses English place names

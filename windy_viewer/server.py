@@ -275,6 +275,23 @@ def _warm_datasets():
     threading.Thread(target=warm, daemon=True).start()
 
 
+# CARTO basemap API key (https://carto.com/basemaps/apikey/). Tiles are
+# fetched by the browser, so the key is necessarily visible client-side;
+# it still lives in .env (not source) and is restricted by CARTO to the
+# domains registered for it. Without a key CARTO watermarks every tile.
+CARTO_API_KEY = os.environ.get("CARTO_API_KEY", "").strip()
+if not CARTO_API_KEY:
+    print("[viewer] CARTO_API_KEY not set — basemap tiles will carry a watermark")
+
+
+@app.get("/config.js")
+def config_js():
+    """Runtime config for the frontend, loaded before app.js."""
+    body = "window.SPEAR_CONFIG = " + json.dumps({"cartoApiKey": CARTO_API_KEY}) + ";\n"
+    return Response(body, media_type="application/javascript",
+                    headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/meta")
 def meta():
     ds = _get_dataset("scenarioSSP5-85")
