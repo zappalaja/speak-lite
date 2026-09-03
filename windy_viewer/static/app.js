@@ -653,6 +653,9 @@ function saveState() {
         job: p.tsReady ? p.tsJob : null,
       })),
       grat: { lat: gratState.lat, lon: gratState.lon },
+      box: (typeof box !== "undefined" && box.bounds)
+        ? { ...box.bounds, start: box.range.start, end: box.range.end, locked: box.locked }
+        : null,
       globe: (typeof globe !== "undefined") ? {
         open: globe.open,
         lon0: globe.lon0,
@@ -1480,6 +1483,7 @@ function createPin(latlng) {
 
 map.on("click", (e) => {
   if (!currentDisplay) return;
+  if (box.drawing || box.suppressClick) return; // box drawing/moving is not a station click
   if (e.originalEvent && (e.originalEvent.ctrlKey || e.originalEvent.metaKey)) {
     addPinnedPoint(e.latlng);
     return;
@@ -1594,6 +1598,7 @@ async function loadField() {
   }
   const seq = ++loadSeq;
   saveState();
+  boxRefresh(); // the box card mirrors the selection it will extract
   const selA = {
     experiment: state.experiment,
     member: state.member,
@@ -2060,6 +2065,12 @@ async function init() {
   if (SAVED && SAVED.opacity != null) el("opacity").value = SAVED.opacity;
   if (SAVED && SAVED.particles != null) el("particles-toggle").checked = SAVED.particles;
   el("compare-toggle").checked = state.compare;
+  if (SAVED && SAVED.box && ["south", "north", "west", "east"].every((k) => Number.isFinite(SAVED.box[k]))) {
+    box.range.start = typeof SAVED.box.start === "string" ? SAVED.box.start : "";
+    box.range.end = typeof SAVED.box.end === "string" ? SAVED.box.end : "";
+    box.locked = !!SAVED.box.locked;
+    boxSetBounds(SAVED.box);
+  }
 
   const STAT_OPTS = [["raw", "Member"], ["mean", "Mean"], ["spread", "Spread"], ["anom", "Anomaly"]];
   const STAT_INFO = {
@@ -2738,30 +2749,97 @@ function globeRender(fast) {
   const px = img.data;
   const y0 = Math.max(0, Math.floor(cy - R)), y1 = Math.min(H, Math.ceil(cy + R));
   const x0 = Math.max(0, Math.floor(cx - R)), x1 = Math.min(W, Math.ceil(cx + R));
+  // Per-pixel inverse projection is the expensive part (asin + atan2 per
+  // pixel). With the view latitude fixed — which is exactly the auto-
+  // rotation case — a pixel's latitude, longitude offset from the view
+  // centre, and limb shade never change, so they are cached and a spin
+  // frame reduces to a field lookup per pixel. Any other change (size,
+  // zoom, tilt) rebuilds the cache in the same pass that renders.
+  // The cache is only kept while auto-rotating; hand drags change the
+  // tilt every frame and would never hit it.
+  let pc = globe.spin ? globe.pixCache : null;
+  const hit = !!(pc && pc.W === W && pc.H === H && pc.R === R && pc.lat0 === globe.lat0 && pc.d === d);
+  if (!hit) {
+    if (globe.spin) {
+      if (!pc || pc.W !== W || pc.H !== H) {
+        pc = {
+          xOff: new Float32Array(W * H), row: new Int32Array(W * H),
+          ty: new Float32Array(W * H), shade: new Float32Array(W * H),
+        };
+      }
+      pc.W = W; pc.H = H; pc.R = R; pc.lat0 = globe.lat0; pc.d = d;
+      pc.shade.fill(0); // 0 = outside the disk
+    } else {
+      pc = null;
+    }
+    globe.pixCache = pc;
+  }
+  const build = !hit && pc !== null;
+  const pX = pc && pc.xOff, pRow = pc && pc.row, pTy = pc && pc.ty, pShade = pc && pc.shade;
+  const lon0 = globe.lon0;
+  const nlon = d.nlon, total = d.nlat * d.nlon;
+  const shift = (lon0 - d.lon0) / d.dlon; // grid x of the view-centre meridian
+  const ld = lut.data, lmin = lut.min, lscale = lut.scale, llast = lut.last;
   for (let iy = y0; iy < y1; iy++) {
     const y = (cy - iy) / R;
     for (let ix = x0; ix < x1; ix++) {
-      const x = (ix - cx) / R;
-      const rho2 = x * x + y * y;
-      if (rho2 > 1) continue;
-      const cosc = Math.sqrt(1 - rho2);
-      const lat = Math.asin(cosc * sp0 + y * cp0) * R2D;
-      const lon = (lam0 + Math.atan2(x, cosc * cp0 - y * sp0)) * R2D;
-      // base sphere tone with limb shading; field color composited on top
-      const shade = 0.7 + 0.3 * cosc;
-      let r = 38, g = 41, b2 = 50;
-      const v = sampleGrid(d, grid, lat, lon);
-      if (v != null && !(fLo != null && v < fLo) && !(fHi != null && v > fHi)) {
-        let idx = ((v - lut.min) * lut.scale) | 0;
-        if (idx < 0) idx = 0;
-        else if (idx > lut.last) idx = lut.last;
-        const li = idx * 4;
-        const a = lut.data[li + 3] / 255;
-        r = lut.data[li] * a + r * (1 - a);
-        g = lut.data[li + 1] * a + g * (1 - a);
-        b2 = lut.data[li + 2] * a + b2 * (1 - a);
+      const k1 = iy * W + ix;
+      let v, shade;
+      if (hit) {
+        shade = pShade[k1];
+        if (shade === 0) continue;
+        // inlined sampleGrid: row index and row fraction come from the
+        // cache, the column is the cached offset plus this frame's shift
+        const r0 = pRow[k1];
+        v = null;
+        if (r0 >= 0) {
+          let xw = (pX[k1] + shift) % nlon;
+          if (xw < 0) xw += nlon;
+          const xi = xw | 0;
+          const tx = xw - xi;
+          const xj = xi + 1 === nlon ? 0 : xi + 1;
+          const r1 = r0 + nlon < total ? r0 + nlon : r0;
+          const ty = pTy[k1];
+          const v00 = grid[r0 + xi], v10 = grid[r0 + xj], v01 = grid[r1 + xi], v11 = grid[r1 + xj];
+          if (v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) {
+            const vn = grid[(ty > 0.5 ? r1 : r0) + (tx > 0.5 ? xj : xi)];
+            v = vn !== vn ? null : vn;
+          } else {
+            v = v00 * (1 - tx) * (1 - ty) + v10 * tx * (1 - ty) + v01 * (1 - tx) * ty + v11 * tx * ty;
+          }
+        }
+      } else {
+        const x = (ix - cx) / R;
+        const rho2 = x * x + y * y;
+        if (rho2 > 1) continue;
+        const cosc = Math.sqrt(1 - rho2);
+        const lat = Math.asin(cosc * sp0 + y * cp0) * R2D;
+        const off = Math.atan2(x, cosc * cp0 - y * sp0) * R2D;
+        const lon = lon0 + off;
+        // base sphere tone with limb shading; field color composited on top
+        shade = 0.7 + 0.3 * cosc;
+        v = sampleGrid(d, grid, lat, lon);
+        if (build) {
+          const gy = (lat - d.lat0) / d.dlat;
+          const inGrid = gy >= 0 && gy <= d.nlat - 1;
+          pShade[k1] = shade;
+          pX[k1] = off / d.dlon;
+          pRow[k1] = inGrid ? (gy | 0) * nlon : -1;
+          pTy[k1] = inGrid ? gy - (gy | 0) : 0;
+        }
       }
-      const k = (iy * W + ix) * 4;
+      let r = 38, g = 41, b2 = 50;
+      if (v != null && !(fLo != null && v < fLo) && !(fHi != null && v > fHi)) {
+        let idx = ((v - lmin) * lscale) | 0;
+        if (idx < 0) idx = 0;
+        else if (idx > llast) idx = llast;
+        const li = idx * 4;
+        const a = ld[li + 3] / 255;
+        r = ld[li] * a + r * (1 - a);
+        g = ld[li + 1] * a + g * (1 - a);
+        b2 = ld[li + 2] * a + b2 * (1 - a);
+      }
+      const k = k1 * 4;
       px[k] = r * shade;
       px[k + 1] = g * shade;
       px[k + 2] = b2 * shade;
@@ -2780,23 +2858,29 @@ function globeRender(fast) {
       cy - R * (cp0 * Math.sin(phi) - sp0 * Math.cos(phi) * Math.cos(dl)),
     ];
   };
+  // Coastlines/borders are ~60k points; projecting them with three trig
+  // calls each per frame was a fixed ~3 ms. Their unit vectors are
+  // precomputed once (globeLineCache) so each frame is a few multiplies.
+  const cl0 = Math.cos(lam0), sl0 = Math.sin(lam0);
   const drawLines = (geo, style, width) => {
     if (!geo) return;
+    const lc = globeLineCache(geo);
+    const xyz = lc.xyz, starts = lc.starts;
     ctx.strokeStyle = style;
     ctx.lineWidth = width * scale;
     ctx.beginPath();
-    for (const ft of geo.features) {
-      const geom = ft.geometry;
-      const lines = geom.type === "LineString" ? [geom.coordinates] : geom.coordinates;
-      for (const line of lines) {
-        let pen = false;
-        for (const c of line) {
-          const p = proj(c[0], c[1]);
-          if (!p) { pen = false; continue; }
-          if (pen) ctx.lineTo(p[0], p[1]);
-          else ctx.moveTo(p[0], p[1]);
-          pen = true;
-        }
+    for (let li = 0; li < starts.length - 1; li++) {
+      let pen = false;
+      for (let i = starts[li]; i < starts[li + 1]; i++) {
+        const pxx = xyz[i * 3], pyy = xyz[i * 3 + 1], pzz = xyz[i * 3 + 2];
+        const a = pxx * cl0 + pyy * sl0;        // cos(phi) cos(dl)
+        const cosc = sp0 * pzz + cp0 * a;
+        if (cosc < 0.001) { pen = false; continue; }
+        const sx = cx + R * (pyy * cl0 - pxx * sl0); // cos(phi) sin(dl)
+        const sy = cy - R * (cp0 * pzz - sp0 * a);
+        if (pen) ctx.lineTo(sx, sy);
+        else ctx.moveTo(sx, sy);
+        pen = true;
       }
     }
     ctx.stroke();
@@ -2905,6 +2989,10 @@ function globeRender(fast) {
     }
   }
 
+  // draw-a-box subset: the same lat/lon rectangle as on the flat map,
+  // so its edges follow parallels/meridians and curve on the sphere
+  if (box.bounds) globeDrawBox(ctx, proj, projLabel, scale, R, cx, cy);
+
   // rim
   ctx.strokeStyle = "rgba(255,255,255,0.22)";
   ctx.lineWidth = 1.5 * scale;
@@ -2913,6 +3001,101 @@ function globeRender(fast) {
   ctx.stroke();
 
   globeSyncPinPositions(); // stations/popup ride the sphere as it moves
+}
+
+function globeDrawBox(ctx, proj, projAny, scale, R, cx, cy) {
+  const b = box.bounds;
+  const width = b.east - b.west;
+  const height = b.north - b.south;
+  const step = Math.max(0.25, 2 / globe.zoom); // finer sampling when zoomed in
+  const nLon = Math.max(2, Math.ceil(width / step));
+  const nLat = Math.max(2, Math.ceil(height / step));
+  // perimeter samples, clockwise from the NW corner
+  const pts = [];
+  for (let i = 0; i <= nLon; i++) pts.push([b.west + (width * i) / nLon, b.north]);
+  for (let i = 1; i <= nLat; i++) pts.push([b.east, b.north - (height * i) / nLat]);
+  for (let i = 1; i <= nLon; i++) pts.push([b.east - (width * i) / nLon, b.south]);
+  for (let i = 1; i < nLat; i++) pts.push([b.west, b.south + (height * i) / nLat]);
+  pts.push(pts[0]);
+
+  // fill: samples behind the limb are pushed onto the rim so the visible
+  // part still fills (an approximation — the outline below is exact)
+  ctx.fillStyle = "rgba(255,209,102,0.10)";
+  ctx.beginPath();
+  let any = false;
+  for (const [lon, lat] of pts) {
+    const p = projAny(lon, lat);
+    let x = p[0], y = p[1];
+    if (p[2] < 0.001) {
+      const dx = x - cx, dy = y - cy;
+      const d = Math.hypot(dx, dy) || 1;
+      x = cx + (dx / d) * R;
+      y = cy + (dy / d) * R;
+    } else any = true;
+    ctx.lineTo(x, y);
+  }
+  if (any) { ctx.closePath(); ctx.fill(); }
+
+  // outline (pen lifts behind the limb)
+  ctx.strokeStyle = box.locked ? "#c9b46e" : "#ffd166";
+  ctx.lineWidth = 2 * scale;
+  ctx.beginPath();
+  let pen = false;
+  for (const [lon, lat] of pts) {
+    const p = proj(lon, lat);
+    if (!p) { pen = false; continue; }
+    pen ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]);
+    pen = true;
+  }
+  ctx.stroke();
+
+  // corner handles (draggable unless locked)
+  const hs = 12 * scale;
+  const corners = boxCornerLatLngs(b);
+  for (const c of BOX_CORNERS) {
+    const p = proj(corners[c][1], corners[c][0]);
+    if (!p) continue;
+    ctx.fillStyle = box.locked ? "#7b7b76" : "#ffd166";
+    ctx.strokeStyle = "#1a1a19";
+    ctx.lineWidth = 2 * scale;
+    ctx.beginPath();
+    ctx.rect(p[0] - hs / 2, p[1] - hs / 2, hs, hs);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+// Flattened unit-sphere vectors for a GeoJSON line collection, built once
+// and kept on the object: xyz = [x,y,z,...] per point, starts = index of
+// each line's first point (plus a final sentinel).
+function globeLineCache(geo) {
+  if (geo._lineCache) return geo._lineCache;
+  let n = 0;
+  const lines = [];
+  for (const ft of geo.features) {
+    const geom = ft.geometry;
+    for (const line of geom.type === "LineString" ? [geom.coordinates] : geom.coordinates) {
+      lines.push(line);
+      n += line.length;
+    }
+  }
+  const xyz = new Float32Array(n * 3);
+  const starts = new Uint32Array(lines.length + 1);
+  let i = 0;
+  lines.forEach((line, li) => {
+    starts[li] = i;
+    for (const c of line) {
+      const phi = c[1] * D2R, lam = c[0] * D2R;
+      const cp = Math.cos(phi);
+      xyz[i * 3] = cp * Math.cos(lam);
+      xyz[i * 3 + 1] = cp * Math.sin(lam);
+      xyz[i * 3 + 2] = Math.sin(phi);
+      i++;
+    }
+  });
+  starts[lines.length] = i;
+  geo._lineCache = { xyz, starts };
+  return geo._lineCache;
 }
 
 // forward/inverse orthographic projection in CSS pixels (for DOM overlays
@@ -3099,7 +3282,31 @@ function globeSpinStep(now) {
   // which visibly lengthened the trails whenever the globe was spinning.
   if (now - (globe.spinRenderT || 0) >= 33) {
     globe.spinRenderT = now;
-    globeRender(0.7); // mid resolution: smooth spin, sharper than drag preview
+    // Adaptive resolution: render at the sharpest scale this machine can
+    // sustain at ~30 fps, up to full resolution. Each spin frame is
+    // timed; the recent median steers the scale up or down with
+    // hysteresis (the first frame after a change rebuilds the pixel
+    // cache and is excluded).
+    const t0 = performance.now();
+    globeRender(globe.spinScale);
+    const dt = performance.now() - t0;
+    if (globe.spinSkip) { globe.spinSkip = false; return; }
+    globe.spinTimes.push(dt);
+    if (globe.spinTimes.length >= 8) {
+      const med = [...globe.spinTimes].sort((a, b) => a - b)[4];
+      globe.spinTimes = [];
+      const full = Math.min(
+        window.devicePixelRatio || 1, 1.5,
+        Math.sqrt(6e6 / (window.innerWidth * window.innerHeight)) // cache ≤ ~96 MB
+      );
+      let next = globe.spinScale;
+      if (med < 18 && next < full) next = Math.min(full, next * 1.15);
+      else if (med > 28 && next > 0.5) next = Math.max(0.5, next * 0.85);
+      if (next !== globe.spinScale) {
+        globe.spinScale = next;
+        globe.spinSkip = true;
+      }
+    }
   }
 }
 
@@ -3110,10 +3317,14 @@ function setGlobeSpin(on) {
   if (on && globe.spinRaf == null) {
     globe.spinLast = performance.now();
     globe.spinPaused = false;
+    if (!globe.spinScale) globe.spinScale = 0.7; // starting point; adapts within a second
+    globe.spinTimes = [];
+    globe.spinSkip = true;
     globe.spinRaf = requestAnimationFrame(globeSpinStep);
   } else if (!on && globe.spinRaf != null) {
     cancelAnimationFrame(globe.spinRaf);
     globe.spinRaf = null;
+    globe.pixCache = null; // free the per-pixel cache (spin-only)
     if (globe.open) globeRender(false); // settle at full resolution
   }
   saveState();
@@ -3134,6 +3345,7 @@ window.addEventListener("resize", () => {
   const canvas = el("globe-canvas");
   let drag = null;
   canvas.addEventListener("pointerdown", (e) => {
+    if (globeBoxPointerDown(e)) return; // drawing / resizing the subset box
     drag = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, moved: false };
     canvas.classList.add("dragging");
     canvas.setPointerCapture(e.pointerId);
@@ -3402,6 +3614,8 @@ async function tsCancel() {
 el("load-cancel").addEventListener("click", () => {
   if (typeof playback !== "undefined" && playback.loading) {
     playback.abort = true; // the preload loop notices and aborts
+  } else if (box.pending) {
+    boxCancel();
   } else {
     tsCancel();
   }
@@ -3684,4 +3898,718 @@ el("chat-text").addEventListener("keydown", (e) => {
     panel.style.top = `${y}px`;
   });
   document.addEventListener("mouseup", () => { drag = null; });
+})();
+
+
+// -------------------------------------------------------- draw-a-box subset
+// Drag a rectangle on the map; resize it by its corner handles, move it by
+// dragging its interior, or type exact SW/NE corner coordinates in the
+// card. The data inside (current variable / scenario / statistic / level
+// over a chosen month range) downloads as NetCDF or CSV via a background
+// server job with real progress, like the station time series.
+const box = {
+  drawing: false,           // draw mode armed (waiting for / during a drag)
+  bounds: null,             // {south, north, west, east}; west in [-180,180), east = west + width
+  rect: null,
+  handles: {},              // corner id -> L.marker
+  range: { start: "", end: "" },
+  job: null, jobSig: null,  // last completed extraction and the parameters it used
+  pending: null,            // {job, fmt, sig} while an extraction runs
+  pollTimer: null,
+  cellsTimer: null,
+  cells: null,              // {nlat, nlon, cells} for the current box on the current grid
+  suppressClick: false,     // swallow the map click Leaflet fires after a draw/move
+  locked: false,            // "Lock in place": no drag/resize/edit/clear until unticked
+};
+const BOX_LOCK_TITLE = "Locked in place — untick “Lock in place” on the box card first";
+map.createPane("box").style.zIndex = 460; // above labels, below tooltips/popups
+
+const BOX_STYLE = {
+  pane: "box", color: "#ffd166", weight: 2, fillColor: "#ffd166", fillOpacity: 0.08,
+  className: "box-rect",
+};
+const BOX_CORNERS = ["nw", "ne", "sw", "se"];
+const BOX_INFO_TEXT =
+  "Drag a rectangle on the map (or type exact SW/NE corner coordinates) and " +
+  "download every grid cell inside it for the current variable, scenario, " +
+  "statistic and level over the chosen month range (up to 10 years). Resize " +
+  "by dragging the corner handles; move by dragging the box itself. Files " +
+  "carry the same provenance metadata as the other downloads, in the store's " +
+  "native units; the CSV is long-form (time, lat, lon, value).";
+
+function normLon(l) { return ((l + 180) % 360 + 360) % 360 - 180; }
+
+function boxNormalize(b) {
+  const south = Math.max(-90, Math.min(b.south, b.north));
+  const north = Math.min(90, Math.max(b.south, b.north));
+  const width = Math.min(360, Math.abs(b.east - b.west));
+  const west = normLon(Math.min(b.west, b.east));
+  return { south, north, west, east: west + width };
+}
+
+function boxCornerLatLngs(b) {
+  return {
+    nw: [b.north, b.west], ne: [b.north, b.east],
+    sw: [b.south, b.west], se: [b.south, b.east],
+  };
+}
+
+// (Re)draw the rectangle + handles for new bounds. quiet: during a drag —
+// no card/status refresh, no persistence.
+function boxSetBounds(b, opts = {}) {
+  box.bounds = boxNormalize(b);
+  const lb = L.latLngBounds([box.bounds.south, box.bounds.west], [box.bounds.north, box.bounds.east]);
+  if (!box.rect) {
+    box.rect = L.rectangle(lb, BOX_STYLE).addTo(map);
+    box.rect.on("mousedown", boxRectMouseDown);
+    for (const c of BOX_CORNERS) {
+      const m = L.marker(lb.getCenter(), {
+        pane: "box",
+        draggable: true,
+        icon: L.divIcon({ className: `box-handle ${c}`, iconSize: [14, 14] }),
+        title: "Drag to resize the box",
+      }).addTo(map);
+      m.on("drag", () => boxHandleDrag(c, m));
+      m.on("dragend", () => { boxSetBounds(box.bounds); saveState(); });
+      box.handles[c] = m;
+    }
+  } else {
+    box.rect.setBounds(lb);
+  }
+  const corners = boxCornerLatLngs(box.bounds);
+  for (const c of BOX_CORNERS) {
+    if (c !== opts.skipHandle) box.handles[c].setLatLng(corners[c]);
+  }
+  if (!opts.quiet) {
+    el("box-clear").hidden = false;
+    el("box-card").hidden = false;
+    boxSetLocked(box.locked);
+    boxRefresh();
+    if (globe.open) globeScheduleFull(); // the globe shows the same box
+  }
+}
+
+// ---- the box on the globe: same coordinates, drawn on the sphere.
+// Draw mode drags out a box; dragging a corner resizes it; everything
+// else stays a rotate-drag.
+function globeBoxCornerAt(cssX, cssY) {
+  if (!box.bounds) return null;
+  const corners = boxCornerLatLngs(box.bounds);
+  for (const c of BOX_CORNERS) {
+    const p = globeProjectCSS(corners[c][0], corners[c][1]);
+    if (p.cosc > 0.001 && Math.hypot(p.x - cssX, p.y - cssY) < 10) return c;
+  }
+  return null;
+}
+
+function globeBoxPointerDown(e) {
+  if (e.button !== 0) return false;
+  const ll0 = globeUnproject(e.clientX, e.clientY);
+  if (!ll0) return false;
+  let mode, fixed, lng;
+  if (box.drawing) {
+    mode = "draw";
+    boxRemoveShapes();
+    fixed = { lat: ll0.lat, lng: ll0.lng };
+    lng = ll0.lng;
+    boxSetBounds({ south: ll0.lat, north: ll0.lat, west: ll0.lng, east: ll0.lng }, { quiet: true });
+  } else {
+    const c = globeBoxCornerAt(e.clientX, e.clientY);
+    if (!c || box.locked) return false;
+    mode = c;
+    lng = c[1] === "w" ? box.bounds.west : box.bounds.east; // continuous lon of the dragged edge
+  }
+  const canvas = el("globe-canvas");
+  canvas.setPointerCapture(e.pointerId);
+  globe.spinPaused = true;
+  gparticles.paused = true;
+  clearGlobeParticleCanvas();
+  let moved = false;
+  const move = (ev) => {
+    const ll = globeUnproject(ev.clientX, ev.clientY);
+    if (!ll) return; // off the sphere: hold the last position
+    moved = true;
+    // unwrap longitude continuously so a drag across the dateline doesn't
+    // flip into a 340°-wide box
+    let l = ll.lng;
+    while (l - lng > 180) l -= 360;
+    while (l - lng < -180) l += 360;
+    lng = l;
+    if (mode === "draw") {
+      boxSetBounds({ south: fixed.lat, north: ll.lat, west: fixed.lng, east: lng }, { quiet: true });
+    } else {
+      const nb = { ...box.bounds };
+      if (mode[0] === "n") nb.north = ll.lat; else nb.south = ll.lat;
+      if (mode[1] === "w") nb.west = lng; else nb.east = lng;
+      boxSetBounds(nb, { quiet: true });
+    }
+    boxRefresh();
+    if (!globe.raf) {
+      globe.raf = requestAnimationFrame(() => { globe.raf = null; globeRender(true); });
+    }
+  };
+  const up = (ev) => {
+    canvas.removeEventListener("pointermove", move);
+    canvas.removeEventListener("pointerup", up);
+    canvas.removeEventListener("pointercancel", up);
+    try { canvas.releasePointerCapture(ev.pointerId); } catch { /* already released */ }
+    gparticles.paused = false;
+    globe.spinPaused = false;
+    resetGlobeParticles();
+    if (mode === "draw") {
+      boxDisarmDraw();
+      const b = box.bounds;
+      if (!moved || !b || b.north - b.south < 1e-6 || b.east - b.west < 1e-6) {
+        boxClear();
+        setStatus("Box cancelled — press and drag to draw a rectangle", true);
+        globeScheduleFull();
+        return;
+      }
+      setStatus("Box drawn: drag its corners to resize, or edit the corner coordinates");
+    }
+    boxSetBounds(box.bounds); // full refresh (card, lock state, globe redraw)
+    saveState();
+  };
+  canvas.addEventListener("pointermove", move);
+  canvas.addEventListener("pointerup", up);
+  canvas.addEventListener("pointercancel", up);
+  return true;
+}
+
+// resize cursor when hovering a corner on the globe
+el("globe-canvas").addEventListener("pointermove", (e) => {
+  if (box.drawing || e.buttons) return;
+  const c = globeBoxCornerAt(e.clientX, e.clientY);
+  el("globe-canvas").style.cursor =
+    c && !box.locked ? (c === "nw" || c === "se" ? "nwse-resize" : "nesw-resize") : "";
+});
+
+function boxSetLocked(on) {
+  box.locked = !!on;
+  el("box-lock").checked = box.locked;
+  for (const c of BOX_CORNERS) {
+    const m = box.handles[c];
+    if (!m) continue;
+    if (m.dragging) { if (box.locked) m.dragging.disable(); else m.dragging.enable(); }
+    const icon = m.getElement();
+    if (icon) icon.classList.toggle("locked", box.locked);
+    m.options.title = box.locked ? BOX_LOCK_TITLE : "Drag to resize the box";
+    if (icon) icon.title = m.options.title;
+  }
+  if (box.rect && box.rect.getElement()) box.rect.getElement().classList.toggle("locked", box.locked);
+  for (const input of document.querySelectorAll(".box-corner input[data-edge]")) input.disabled = box.locked;
+  for (const btn of document.querySelectorAll(".box-hemi")) btn.disabled = box.locked;
+  const clear = el("box-clear");
+  clear.disabled = box.locked;
+  clear.title = box.locked ? BOX_LOCK_TITLE : "Remove the drawn box";
+  const close = el("box-card-close");
+  close.disabled = box.locked;
+  close.title = box.locked ? BOX_LOCK_TITLE : "Remove the box";
+  const draw = el("box-btn");
+  draw.disabled = box.locked;
+  if (box.locked) draw.title = BOX_LOCK_TITLE;
+  else if (!box.drawing) draw.title = "Drag a rectangle on the map, then download the data inside it (NetCDF/CSV) over a chosen time range";
+}
+
+function boxHandleDrag(c, marker) {
+  const ll = marker.getLatLng();
+  const nb = { ...box.bounds };
+  if (c[0] === "n") nb.north = ll.lat; else nb.south = ll.lat;
+  if (c[1] === "w") nb.west = ll.lng; else nb.east = ll.lng;
+  boxSetBounds(nb, { quiet: true, skipHandle: c });
+  boxRefresh();
+}
+
+// Drag the rectangle body to move the whole box.
+function boxRectMouseDown(e) {
+  if (box.drawing || !box.bounds || box.locked) return;
+  const oe = e.originalEvent;
+  if (oe.button !== 0) return;
+  L.DomEvent.stopPropagation(oe);
+  const start = e.latlng;
+  const orig = { ...box.bounds };
+  let moved = false;
+  map.dragging.disable();
+  const move = (ev) => {
+    let dlat = ev.latlng.lat - start.lat;
+    dlat = Math.max(-90 - orig.south, Math.min(90 - orig.north, dlat));
+    const dlng = ev.latlng.lng - start.lng;
+    if (dlat || dlng) moved = true;
+    boxSetBounds({
+      south: orig.south + dlat, north: orig.north + dlat,
+      west: orig.west + dlng, east: orig.east + dlng,
+    }, { quiet: true });
+    boxRefresh();
+  };
+  const up = () => {
+    map.off("mousemove", move);
+    map.off("mouseup", up);
+    document.removeEventListener("mouseup", up);
+    map.dragging.enable();
+    if (moved) {
+      box.suppressClick = true;
+      setTimeout(() => { box.suppressClick = false; }, 0);
+      boxSetBounds(box.bounds);
+      saveState();
+    }
+  };
+  map.on("mousemove", move);
+  map.on("mouseup", up);
+  document.addEventListener("mouseup", up);
+}
+
+// ---- draw mode
+function boxArmDraw() {
+  if (box.drawing) { boxDisarmDraw(); return; }
+  if (box.locked) { setStatus("The box is locked in place — untick “Lock in place” to draw a new one", true); return; }
+  const where = globe.open ? "globe" : "map";
+  box.drawing = true;
+  map.dragging.disable();
+  map.closePopup();
+  el("map").classList.add("box-drawing");
+  el("globe-view").classList.add("box-drawing");
+  const btn = el("box-btn");
+  btn.classList.add("active");
+  btn.textContent = `Drag on the ${where}…`;
+  btn.title = `Press and drag on the ${where} to draw the box (click again or press Esc to cancel)`;
+  setStatus(`Draw a box: press and drag on the ${where}`);
+}
+
+function boxDisarmDraw() {
+  box.drawing = false;
+  map.dragging.enable();
+  el("map").classList.remove("box-drawing");
+  el("globe-view").classList.remove("box-drawing");
+  const btn = el("box-btn");
+  btn.classList.remove("active");
+  btn.textContent = "Draw a Box";
+  btn.title = "Drag a rectangle on the map, then download the data inside it (NetCDF/CSV) over a chosen time range";
+}
+
+map.on("mousedown", (e) => {
+  if (!box.drawing) return;
+  const oe = e.originalEvent;
+  if (oe.button !== 0) return;
+  L.DomEvent.preventDefault(oe);
+  const start = e.latlng;
+  let last = start;
+  boxRemoveShapes(); // a new drag replaces any existing box
+  boxSetBounds({ south: start.lat, north: start.lat, west: start.lng, east: start.lng }, { quiet: true });
+  const move = (ev) => {
+    last = ev.latlng;
+    boxSetBounds({ south: start.lat, north: last.lat, west: start.lng, east: last.lng }, { quiet: true });
+  };
+  const up = () => {
+    map.off("mousemove", move);
+    map.off("mouseup", up);
+    document.removeEventListener("mouseup", up);
+    boxDisarmDraw();
+    box.suppressClick = true;
+    setTimeout(() => { box.suppressClick = false; }, 0);
+    const tiny = Math.abs(last.lat - start.lat) < 1e-6 || Math.abs(last.lng - start.lng) < 1e-6;
+    if (tiny) {
+      boxClear();
+      setStatus("Box cancelled — press and drag to draw a rectangle", true);
+      return;
+    }
+    boxSetBounds(box.bounds);
+    saveState();
+    setStatus("Box drawn: resize by its corners, move by dragging, or edit the corner coordinates");
+  };
+  map.on("mousemove", move);
+  map.on("mouseup", up);
+  document.addEventListener("mouseup", up);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && box.drawing) boxDisarmDraw();
+});
+
+function boxRemoveShapes() {
+  if (box.rect) { box.rect.remove(); box.rect = null; }
+  for (const c of BOX_CORNERS) if (box.handles[c]) box.handles[c].remove();
+  box.handles = {};
+  box.bounds = null;
+  box.cells = null;
+  box.job = null;
+  box.jobSig = null;
+}
+
+function boxClear() {
+  if (box.locked) { setStatus("The box is locked in place — untick “Lock in place” to remove it", true); return; }
+  boxRemoveShapes();
+  el("box-clear").hidden = true;
+  el("box-card").hidden = true;
+  boxSetLocked(false);
+  if (globe.open) globeScheduleFull();
+  saveState();
+}
+
+// ---- the card: selection summary, corner coordinates, month range, size
+function boxStatText() {
+  return {
+    raw: `member ${state.member}`,
+    mean: "ensemble mean",
+    spread: "ensemble spread",
+    anom: `anomaly of ${state.member}`,
+  }[state.stat];
+}
+
+function boxSetInput(id, value) {
+  const input = el(id);
+  if (document.activeElement === input) return; // don't clobber what the user is typing
+  input.value = value;
+}
+
+function boxRefresh() {
+  if (!box.bounds || !meta) return;
+  const b = box.bounds;
+  const edges = boxDisplayEdges(b);
+  for (const input of document.querySelectorAll(".box-corner input[data-edge]")) {
+    const v = edges[input.dataset.edge];
+    boxSetInput(input.id, Math.abs(v).toFixed(2));
+    // magnitude + hemisphere: the sign lives in the N/S or E/W button
+    // (an exact 0 keeps whichever hemisphere is currently shown)
+    if (v !== 0) boxSetHemi(boxHemiOf(input), v < 0);
+  }
+
+  const v = meta.variables[state.var];
+  el("box-sel").textContent =
+    `${v.label} (${state.var}) · ${EXP_SHORT[state.experiment] || state.experiment} · ` +
+    `${boxStatText()}${v.plev ? ` · ${state.plev} hPa` : ""}`;
+
+  // month range: default to the displayed month; keep inside the scenario
+  const exp = meta.experiments[state.experiment];
+  const cur = el("month-input").value || exp.start;
+  const inExp = (m) => /^\d{4}-\d{2}$/.test(m) && m >= exp.start && m <= exp.end;
+  if (!inExp(box.range.start)) box.range.start = inExp(cur) ? cur : exp.start;
+  if (!inExp(box.range.end) || box.range.end < box.range.start) box.range.end = box.range.start;
+  const maxEnd = boxMaxEnd(box.range.start, exp.end);
+  if (box.range.end > maxEnd) box.range.end = maxEnd;
+  for (const id of ["box-start", "box-end"]) {
+    el(id).min = exp.start;
+    el(id).max = exp.end;
+  }
+  boxSetInput("box-start", box.range.start);
+  boxSetInput("box-end", box.range.end);
+
+  el("box-note").textContent = state.compare
+    ? "Compare mode: the box exports selection A only (not the A − B difference)."
+    : "";
+  boxUpdateSize();
+  boxFetchCells();
+}
+
+function boxMaxEnd(start, expEnd) {
+  const limit = ((meta && meta.box_limits && meta.box_limits.months) || 120) - 1;
+  const [y, m] = start.split("-").map(Number);
+  const total = (m - 1) + limit;
+  const maxEnd = `${String(y + Math.floor(total / 12)).padStart(4, "0")}-${String((total % 12) + 1).padStart(2, "0")}`;
+  return maxEnd < expEnd ? maxEnd : expEnd;
+}
+
+function boxFetchCells() {
+  clearTimeout(box.cellsTimer);
+  box.cellsTimer = setTimeout(async () => {
+    const b = box.bounds;
+    if (!b) return;
+    const params = new URLSearchParams({
+      var: state.var, experiment: state.experiment,
+      south: b.south, north: b.north, west: b.west, east: b.east,
+    });
+    try {
+      const r = await fetchJSON(`/api/box/cells?${params}`);
+      if (box.bounds !== b) return; // box changed meanwhile
+      box.cells = r;
+      boxUpdateSize();
+    } catch {
+      box.cells = null;
+      boxUpdateSize();
+    }
+  }, 250);
+}
+
+function boxUpdateSize() {
+  const out = el("box-cells");
+  const months = box.range.start && box.range.end ? tsMonthCount(box.range.start, box.range.end) : 0;
+  const limit = (meta && meta.box_limits && meta.box_limits.values) || 2e7;
+  let over = false;
+  if (!box.cells) {
+    out.textContent = months ? `${months} month${months === 1 ? "" : "s"} · counting grid cells…` : "";
+  } else {
+    const values = box.cells.cells * months;
+    over = values > limit;
+    out.textContent =
+      `${box.cells.nlat} × ${box.cells.nlon} = ${box.cells.cells.toLocaleString()} grid cells · ` +
+      `${months} month${months === 1 ? "" : "s"} · ${values.toLocaleString()} values` +
+      (over ? ` — exceeds the ${limit.toLocaleString()}-value limit; shrink the box or the time range` : "");
+  }
+  out.classList.toggle("over", over);
+  for (const id of ["box-dl-nc", "box-dl-csv"]) el(id).disabled = over || !!box.pending;
+  boxRenderGrid();
+}
+
+// The exact model grid-cell centres the box snaps to — what the file will
+// contain. Longitudes are shown in the file's convention (native 0–360, or
+// -180..180 for a box straddling Greenwich) with the map-style value in
+// parentheses when the two differ.
+function boxRenderGrid() {
+  const g = box.cells;
+  const out = el("box-grid");
+  if (!g || !Number.isFinite(g.lat_min)) {
+    out.textContent = box.bounds ? "Grid cells: computing…" : "";
+    return;
+  }
+  const f = (v) => v.toFixed(3);
+  const lonAlt = (v) => (Math.abs(normLon(v) - v) > 1e-9 ? ` (${f(normLon(v))})` : "");
+  const stepLat = `${g.nlat} × ${g.dlat}°`;
+  const stepLon = `${g.nlon} × ${g.dlon}°`;
+  out.textContent =
+    `Model coords that will be extracted (nearest grid cells)\n` +
+    `lat ${f(g.lat_min)} to ${f(g.lat_max)}  (${stepLat})\n` +
+    `lon ${f(g.lon_min)}${lonAlt(g.lon_min)} to ${f(g.lon_max)}${lonAlt(g.lon_max)}  (${stepLon})` +
+    (g.wrap ? "\nlongitudes written as −180..180 (box crosses 0°)" : "");
+}
+
+// Edge values as shown in the corner inputs: lon in -180..180, a
+// full-width box shown as -180..180.
+function boxDisplayEdges(b) {
+  const full = b.east - b.west >= 359.999;
+  return {
+    south: b.south, north: b.north,
+    west: full ? -180 : normLon(b.west),
+    east: full ? 180 : normLon(b.east),
+  };
+}
+
+// Each corner field is a magnitude; the hemisphere button beside it
+// (°N/°S or °E/°W) carries the sign. The button is a fixed designator
+// the user sets — typing a minus sign never flips it (the magnitude is
+// taken as is), so "1 °N" can't silently become "1 °S".
+function boxHemiOf(input) { return input.parentElement.querySelector(".box-hemi"); }
+function boxHemiNegative(btn) { return btn.dataset.neg === "1"; }
+function boxSetHemi(btn, negative) {
+  btn.dataset.neg = negative ? "1" : "0";
+  btn.textContent = btn.dataset.kind === "lat" ? (negative ? "°S" : "°N") : (negative ? "°W" : "°E");
+}
+
+// Any corner input edits the edge it lies on (two corners share each
+// edge, so the twin input updates too).
+function boxCornerChanged(input) {
+  if (box.locked) { boxRefresh(); return; }
+  const mag = Math.abs(parseFloat(input.value));
+  const edge = input.dataset.edge;
+  const limit = edge === "south" || edge === "north" ? 90 : 180;
+  if (!Number.isFinite(mag) || mag > limit) {
+    setStatus(`Box: ${edge} edge must be a number between 0 and ${limit} (pick N/S or E/W beside it)`, true);
+    boxRefresh();
+    return;
+  }
+  const v = boxHemiNegative(boxHemiOf(input)) ? -mag : mag;
+  const edges = boxDisplayEdges(box.bounds);
+  edges[edge] = v;
+  // The box spans eastward from the west edge to the east edge (wrapping
+  // across the dateline when east < west); identical edges span 360°.
+  let width = ((edges.east - edges.west) % 360 + 360) % 360;
+  if (width === 0 && edges.east !== edges.west) width = 360;
+  boxSetBounds({ south: edges.south, north: edges.north, west: edges.west, east: edges.west + width });
+  if (globe.open) { // bring the box into view on whichever view is open
+    const b = box.bounds;
+    globe.lat0 = Math.min(85, Math.max(-85, (b.south + b.north) / 2));
+    globe.lon0 = normLon((b.west + b.east) / 2);
+    globeScheduleFull();
+  } else {
+    map.fitBounds(box.rect.getBounds(), { padding: [40, 40], maxZoom: map.getZoom() });
+  }
+  saveState();
+}
+
+function boxRangeChanged(which) {
+  const input = el(which === "start" ? "box-start" : "box-end");
+  let v = input.value.trim();
+  if (/^\d{4}$/.test(v)) v = `${v}-${which === "start" ? "01" : "12"}`;
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(v)) {
+    setStatus("Box: type months as YYYY-MM", true);
+    boxRefresh();
+    return;
+  }
+  const exp = meta.experiments[state.experiment];
+  if (v < exp.start) v = exp.start;
+  if (v > exp.end) v = exp.end;
+  box.range[which] = v;
+  const maxEnd = boxMaxEnd(box.range.start, exp.end);
+  if (box.range.end > maxEnd) {
+    box.range.end = maxEnd;
+    const limit = (meta.box_limits && meta.box_limits.months) || 120;
+    setStatus(`Box: max ${Math.floor(limit / 12)} years (${limit} months) per extraction — end clamped`, true);
+  }
+  if (box.range.end < box.range.start) box.range.end = box.range.start;
+  boxRefresh();
+  saveState();
+}
+
+// ---- extraction job + download
+function boxPayload() {
+  const b = box.bounds;
+  const payload = {
+    var: state.var, experiment: state.experiment, member: state.member, stat: state.stat,
+    box: { south: b.south, north: b.north, west: b.west, east: b.east },
+    start: box.range.start, end: box.range.end,
+  };
+  if (meta.variables[state.var].plev) payload.plev = state.plev;
+  return payload;
+}
+
+function boxOpenDownload(job, fmt) {
+  const a = document.createElement("a");
+  a.href = `/api/box/data/${job}?format=${fmt}`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function boxDownload(fmt) {
+  if (!box.bounds || box.pending) return;
+  if (!box.range.start || !box.range.end || box.range.end < box.range.start) {
+    setStatus("Box: pick a valid start/end month", true);
+    return;
+  }
+  const payload = boxPayload();
+  const sig = JSON.stringify(payload);
+  if (box.job && box.jobSig === sig) { // same subset already extracted: just re-download
+    boxOpenDownload(box.job, fmt);
+    return;
+  }
+  try {
+    const r = await fetchJSON2("/api/box/start", payload);
+    box.pending = { job: r.job, fmt, sig };
+    boxUpdateSize();
+    boxShowProgress(r);
+    boxPoll(r.job);
+  } catch (e) {
+    setStatus(`Box extraction: ${e.message || e}`, true);
+  }
+}
+
+function boxShowProgress(r) {
+  el("load-overlay").hidden = false;
+  el("load-title").textContent = "Extracting box subset…";
+  el("load-pct").textContent = "0%";
+  el("load-note").innerHTML =
+    `${r.cells.toLocaleString()} grid cells × ${r.months} month${r.months === 1 ? "" : "s"}. ` +
+    "Reading one data chunk per month from the cloud store" +
+    (state.stat !== "raw" ? " (×30 members for ensemble statistics)" : "") +
+    ".<br>Progress shown is real, not estimated.";
+  el("load-cancel").hidden = false;
+}
+
+function boxHideProgress() {
+  el("load-overlay").hidden = true;
+  el("load-cancel").hidden = true;
+  if (box.pollTimer) { clearTimeout(box.pollTimer); box.pollTimer = null; }
+}
+
+async function boxPoll(job) {
+  try {
+    const s = await fetchJSON(`/api/box/status/${job}`);
+    if (!box.pending || box.pending.job !== job) return; // cancelled / superseded
+    if (s.error) {
+      box.pending = null;
+      boxHideProgress();
+      boxUpdateSize();
+      setStatus(`Box extraction failed: ${s.error}`, true);
+      return;
+    }
+    el("load-pct").textContent = `${Math.round(s.progress * 100)}%`;
+    if (s.done) {
+      const { fmt, sig } = box.pending;
+      box.pending = null;
+      box.job = job;
+      box.jobSig = sig;
+      boxHideProgress();
+      boxUpdateSize();
+      boxOpenDownload(job, fmt);
+      setStatus(`Box subset ready — ${fmt === "nc" ? "NetCDF" : "CSV"} download started`);
+      return;
+    }
+  } catch (e) {
+    box.pending = null;
+    boxHideProgress();
+    boxUpdateSize();
+    setStatus(`Box extraction failed: ${e.message || e}`, true);
+    return;
+  }
+  box.pollTimer = setTimeout(() => boxPoll(job), 800);
+}
+
+async function boxCancel() {
+  const job = box.pending ? box.pending.job : null;
+  box.pending = null;
+  boxHideProgress();
+  boxUpdateSize();
+  setStatus("Box extraction cancelled");
+  if (job) {
+    try {
+      await fetch(`/api/box/cancel/${job}`, { method: "POST" });
+    } catch { /* server may already be done */ }
+  }
+}
+
+// ---- wiring
+el("box-btn").addEventListener("click", boxArmDraw);
+el("box-clear").addEventListener("click", boxClear);
+el("box-card-close").addEventListener("click", boxClear);
+el("box-dl-nc").addEventListener("click", () => boxDownload("nc"));
+el("box-dl-csv").addEventListener("click", () => boxDownload("csv"));
+for (const input of document.querySelectorAll(".box-corner input[data-edge]")) {
+  input.addEventListener("change", () => boxCornerChanged(input));
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+  const hemi = boxHemiOf(input);
+  boxSetHemi(hemi, false);
+  hemi.addEventListener("click", () => {
+    if (box.locked) return;
+    boxSetHemi(hemi, !boxHemiNegative(hemi));
+    boxCornerChanged(input); // re-apply the field with its new sign
+  });
+}
+el("box-lock").addEventListener("change", (e) => {
+  boxSetLocked(e.target.checked);
+  if (globe.open) globeScheduleFull();
+  saveState();
+  setStatus(box.locked
+    ? "Box locked in place: untick “Lock in place” to move, resize, edit or remove it"
+    : "Box unlocked");
+});
+el("box-start").addEventListener("change", () => boxRangeChanged("start"));
+el("box-end").addEventListener("change", () => boxRangeChanged("end"));
+el("box-info").addEventListener("click", (e) => {
+  e.stopPropagation();
+  showInfoPopover(BOX_INFO_TEXT, e.clientX, e.clientY);
+});
+el("box-info").title = BOX_INFO_TEXT;
+
+// drag the card by its header (buttons excluded)
+(() => {
+  const card = el("box-card");
+  const head = el("box-card-head");
+  head.addEventListener("mousedown", (e) => {
+    if (e.target.closest("button") || e.target.closest(".info-i")) return;
+    const r = card.getBoundingClientRect();
+    card.style.left = `${r.left}px`;
+    card.style.top = `${r.top}px`;
+    card.style.right = "auto";
+    const drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+    const move = (ev) => {
+      card.style.left = `${Math.min(Math.max(ev.clientX - drag.dx, 4), window.innerWidth - 120)}px`;
+      card.style.top = `${Math.min(Math.max(ev.clientY - drag.dy, 4), window.innerHeight - 40)}px`;
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+    e.preventDefault();
+  });
 })();

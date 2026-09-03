@@ -313,6 +313,7 @@ def meta():
         "levels": levels,
         "members": _members(ds),
         "ts_limits": {"months": TS_MAX_MONTHS},
+        "box_limits": {"months": BOX_MAX_MONTHS, "values": BOX_MAX_VALUES},
     }
 
 
@@ -1098,6 +1099,302 @@ def ts_data(job_id: str, format: str = Query("csv", pattern="^(csv|nc)$")):
     for i, mth in enumerate(r["months"]):
         row = ",".join(f"{r['values'][i, k]:.6g}" for k in range(len(cols)))
         buf.write(f"{mth},{row}\n")
+    return Response(buf.getvalue().encode(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{stem}.csv"'})
+
+
+# ---------------------------------------------------------------- box subset
+# Rectangular lat/lon subset over a month range, downloadable as NetCDF or
+# CSV with the same provenance metadata as the single-month downloads.
+# Runs as a background job like the station time series (one chunk read
+# per month, x30 for ensemble statistics). Values stay in the store's
+# native units, as /api/download does.
+BOX_MAX_MONTHS = TS_MAX_MONTHS
+BOX_MAX_VALUES = int(float(os.environ.get("BOX_MAX_VALUES", "20e6")))
+_box_jobs: dict = {}
+_box_lock = threading.Lock()
+
+
+def _box_indices(ds: xr.Dataset, box: dict):
+    """Index slices covering a lat/lon box on the store grid.
+
+    Longitudes are handled in the store's 0-360 convention. A box that
+    straddles the Greenwich meridian maps to two lon slices ("wrap") which
+    the job concatenates and re-labels as -180..180. A box narrower than a
+    grid cell falls back to the cell nearest its centre."""
+    lat = ds.lat.values.astype(float)
+    lon = ds.lon.values.astype(float)
+    s, n = sorted((float(box["south"]), float(box["north"])))
+    w, e = float(box["west"]), float(box["east"])
+    if e < w:
+        w, e = e, w
+
+    ilat = np.where((lat >= s) & (lat <= n))[0]
+    if ilat.size == 0:
+        ilat = np.array([int(np.argmin(np.abs(lat - (s + n) / 2)))])
+    lat_sl = slice(int(ilat.min()), int(ilat.max()) + 1)
+
+    if e - w >= 360:
+        return lat_sl, [slice(0, lon.size)], False
+    w360, e360 = w % 360, e % 360
+    if w360 <= e360:
+        ilon = np.where((lon >= w360) & (lon <= e360))[0]
+        if ilon.size == 0:
+            ilon = np.array([int(np.argmin(np.abs(lon - (w360 + e360) / 2)))])
+        return lat_sl, [slice(int(ilon.min()), int(ilon.max()) + 1)], False
+    hi = np.where(lon >= w360)[0]   # west part: w360..360
+    lo = np.where(lon <= e360)[0]   # east part: 0..e360
+    parts = []
+    if hi.size:
+        parts.append(slice(int(hi.min()), lon.size))
+    if lo.size:
+        parts.append(slice(0, int(lo.max()) + 1))
+    if not parts:
+        mid = ((w360 + e360 + 360) / 2) % 360
+        j = int(np.argmin(np.abs(lon - mid)))
+        return lat_sl, [slice(j, j + 1)], False
+    return lat_sl, parts, len(parts) == 2
+
+
+def _box_shape(ds: xr.Dataset, box: dict) -> tuple[int, int]:
+    lat_sl, lon_sls, _ = _box_indices(ds, box)
+    nlat = lat_sl.stop - lat_sl.start
+    nlon = sum(sl.stop - sl.start for sl in lon_sls)
+    return nlat, nlon
+
+
+def _parse_box(raw) -> dict:
+    try:
+        box = {k: float(raw[k]) for k in ("south", "north", "west", "east")}
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "box needs numeric south, north, west, east")
+    if not all(np.isfinite(v) for v in box.values()):
+        raise HTTPException(400, "box coordinates must be finite")
+    box["south"], box["north"] = sorted((max(-90.0, box["south"]), min(90.0, box["north"])))
+    if box["east"] - box["west"] > 360:
+        box["east"] = box["west"] + 360
+    return box
+
+
+def _run_box_job(job_id: str, p: dict):
+    job = _box_jobs[job_id]
+    try:
+        cfg = VARIABLES[p["var"]]
+        ds = _get_dataset(p["experiment"], cfg["group"])
+        lat_sl, lon_sls, wrap = _box_indices(ds, p["box"])
+        months = p["months"]
+        stat = p["stat"]
+        parts = []
+        for b0 in range(0, len(months), TS_BATCH_MONTHS):
+            if job.get("cancel"):
+                job["error"] = "cancelled"
+                job["done"] = True
+                return
+            batch = months[b0:b0 + TS_BATCH_MONTHS]
+            da = ds[p["var"]].sel(time=slice(batch[0], batch[-1]))
+            attrs = dict(da.attrs)
+            if stat == "mean":
+                da = da.mean("member_id", keep_attrs=True)
+            elif stat == "spread":
+                da = da.std("member_id", ddof=1, keep_attrs=True)
+            elif stat == "anom":
+                da = da.sel(member_id=p["member"]) - da.mean("member_id")
+                da.attrs = attrs
+            else:
+                da = da.sel(member_id=p["member"])
+            if cfg["plev"]:
+                da = da.sel(plev=(p.get("plev") or 500) * 100.0, method="nearest")
+            da = da.isel(lat=lat_sl)
+            if len(lon_sls) == 1:
+                da = da.isel(lon=lon_sls[0])
+            else:
+                da = xr.concat([da.isel(lon=sl) for sl in lon_sls], dim="lon")
+            da = _load_da(da)
+            if "member_id" in da.coords:
+                da = da.drop_vars("member_id")
+            parts.append(da)
+            job["progress"] = min(0.97, (b0 + len(batch)) / len(months))
+        da = xr.concat(parts, dim="time") if len(parts) > 1 else parts[0]
+        da = da.transpose("time", "lat", "lon")
+        if wrap:
+            lon = da.lon.values.astype(float)
+            da = da.assign_coords(lon=("lon", ((lon + 180) % 360) - 180, dict(da.lon.attrs)))
+        long = da.attrs.get("long_name", p["var"])
+        if stat == "spread":
+            da.attrs["long_name"] = f"ensemble standard deviation (ddof=1, N=30) of {long}"
+        elif stat == "anom":
+            da.attrs["long_name"] = f"member {p['member']} minus ensemble mean of {long}"
+        elif stat == "mean":
+            da.attrs["long_name"] = f"ensemble mean (30 members) of {long}"
+        # Store-specific encodings (zarr chunks/compressors) must not leak
+        # into the NetCDF writer; keep only the calendar encoding of time.
+        da.encoding = {}
+        for c in da.coords.values():
+            keep = {k: v for k, v in c.encoding.items() if k in ("units", "calendar", "dtype")}
+            c.encoding = keep
+        job["result"] = {"da": da, "params": p, "wrap": wrap}
+        job["progress"] = 1.0
+        job["done"] = True
+    except Exception as e:
+        job["error"] = str(e)[:300]
+        job["done"] = True
+
+
+@app.get("/api/box/cells")
+def box_cells(
+    var: str = Query("pr"),
+    experiment: str = Query("scenarioSSP5-85"),
+    south: float = Query(...), north: float = Query(...),
+    west: float = Query(...), east: float = Query(...),
+):
+    """How many grid cells a box covers on the variable's grid (cheap:
+    coordinates only), so the UI can show the size before extracting."""
+    if var not in VARIABLES:
+        raise HTTPException(400, f"unknown variable {var!r}")
+    if experiment not in EXPERIMENTS:
+        raise HTTPException(400, f"unknown experiment {experiment!r}")
+    box = _parse_box({"south": south, "north": north, "west": west, "east": east})
+    ds = _get_dataset(experiment, VARIABLES[var]["group"])
+    lat_sl, lon_sls, wrap = _box_indices(ds, box)
+    lat_all = ds.lat.values.astype(float)
+    lon_all = ds.lon.values.astype(float)
+    lat = lat_all[lat_sl]
+    lon = np.concatenate([lon_all[sl] for sl in lon_sls])
+    if wrap:
+        lon = ((lon + 180) % 360) - 180
+    return {
+        "nlat": int(lat.size), "nlon": int(lon.size), "cells": int(lat.size * lon.size),
+        # exact grid-cell centres that will be extracted (file convention)
+        "lat_min": float(lat.min()), "lat_max": float(lat.max()),
+        "lon_min": float(lon.min()), "lon_max": float(lon.max()),
+        "dlat": round(float(abs(lat_all[1] - lat_all[0])), 4),
+        "dlon": round(float(abs(lon_all[1] - lon_all[0])), 4),
+        "wrap": bool(wrap),
+    }
+
+
+@app.post("/api/box/start")
+def box_start(payload: dict):
+    var = payload.get("var")
+    if var not in VARIABLES:
+        raise HTTPException(400, f"unknown variable {var!r}")
+    experiment = payload.get("experiment")
+    if experiment not in EXPERIMENTS:
+        raise HTTPException(400, f"unknown experiment {experiment!r}")
+    stat = payload.get("stat", "raw")
+    if stat not in STATS:
+        raise HTTPException(400, f"unknown stat {stat!r}")
+    member = payload.get("member", "r1i1p1f1")
+    if member == "ensmean" and stat == "raw":
+        stat = "mean"
+    box = _parse_box(payload.get("box") or {})
+    start, end = payload.get("start", ""), payload.get("end", "")
+    exp = EXPERIMENTS[experiment]
+    if not (exp["start"] <= start <= end <= exp["end"]):
+        raise HTTPException(400, f"range must lie within {exp['start']}..{exp['end']}")
+    months = _ts_month_list(start, end)
+    if len(months) > BOX_MAX_MONTHS:
+        raise HTTPException(
+            400, f"Range too long: max {BOX_MAX_MONTHS} months "
+                 f"({BOX_MAX_MONTHS // 12} years) per extraction.")
+    ds = _get_dataset(experiment, VARIABLES[var]["group"])
+    nlat, nlon = _box_shape(ds, box)
+    n_values = len(months) * nlat * nlon
+    if n_values > BOX_MAX_VALUES:
+        raise HTTPException(
+            400, f"Box too large: {n_values:,} values ({nlat} x {nlon} cells x "
+                 f"{len(months)} months) exceeds the {BOX_MAX_VALUES:,} limit. "
+                 "Shrink the box or the time range.")
+    job_id = uuid.uuid4().hex[:12]
+    params = {
+        "var": var, "experiment": experiment, "member": member, "stat": stat,
+        "plev": payload.get("plev"), "box": box, "months": months,
+        "start": start, "end": end,
+    }
+    with _box_lock:
+        # subsets can be large; keep only the last few in memory
+        for old in list(_box_jobs)[:-3]:
+            _box_jobs.pop(old, None)
+        _box_jobs[job_id] = {"progress": 0.0, "done": False, "error": None, "cancel": False}
+    threading.Thread(target=_run_box_job, args=(job_id, params), daemon=True).start()
+    return {"job": job_id, "months": len(months), "cells": nlat * nlon}
+
+
+@app.post("/api/box/cancel/{job_id}")
+def box_cancel(job_id: str):
+    job = _box_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "unknown job")
+    job["cancel"] = True
+    return {"ok": True}
+
+
+@app.get("/api/box/status/{job_id}")
+def box_status(job_id: str):
+    job = _box_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "unknown job")
+    return {"progress": job["progress"], "done": job["done"], "error": job["error"]}
+
+
+@app.get("/api/box/data/{job_id}")
+def box_data(job_id: str, format: str = Query("nc", pattern="^(nc|csv)$")):
+    job = _box_jobs.get(job_id)
+    if job is None or not job.get("done") or job.get("error"):
+        raise HTTPException(404, "no data for this job")
+    r = job["result"]
+    p = r["params"]
+    da = r["da"]
+    var = p["var"]
+    cfg = VARIABLES[var]
+    box = p["box"]
+    src = _source_attrs(_get_dataset(p["experiment"], cfg["group"]))
+    lev_txt = f", pressure level {int(round(float(da.plev.values) / 100))} hPa" if "plev" in da.coords else ""
+    lev_suffix = f"_{int(p['plev'] or 500)}hPa" if cfg["plev"] else ""
+    lat = da.lat.values
+    lon = da.lon.values
+    attrs = _global_attrs(var, src, {
+        "title": f"SPEAR-MED box subset: {var}",
+        "selection": f"experiment {p['experiment']}, {_stat_text(p['stat'], p['member'])}, "
+                     f"months {p['start']} to {p['end']}{lev_txt}",
+        "statistic": _stat_text(p["stat"], p["member"]),
+        "period": f"{p['start']} to {p['end']} (monthly, {da.sizes['time']} steps)",
+        "box_requested": f"lat {box['south']:.3f} to {box['north']:.3f}, "
+                         f"lon {box['west']:.3f} to {box['east']:.3f} (degrees east, as drawn)",
+        "box_grid": f"{lat.size} lat x {lon.size} lon = {lat.size * lon.size} cells; "
+                    f"lat {float(lat.min()):.3f} to {float(lat.max()):.3f}, "
+                    f"lon {float(lon.min()):.3f} to {float(lon.max()):.3f}",
+        "longitude_convention": ("-180..180 (this box straddles the Greenwich meridian)"
+                                 if r["wrap"] else "0..360 (native store convention)"),
+    })
+    stem = (f"box_{var}_{p['experiment']}_{_stat_token(p['stat'], p['member'])}"
+            f"_{p['start']}_{p['end']}{lev_suffix}")
+    if format == "nc":
+        ds_out = da.to_dataset(name=var)
+        ds_out.attrs = attrs
+        body = _to_netcdf_bytes(ds_out)
+        return Response(body, media_type="application/x-netcdf",
+                        headers={"Content-Disposition": f'attachment; filename="{stem}.nc"'})
+    import pandas as pd
+
+    buf = io.StringIO()
+    for k, v in attrs.items():
+        buf.write(f"# {k}: {_csv_attr(v)}\n")
+    for k, v in da.attrs.items():
+        buf.write(f"# column {var} {k}: {_csv_attr(v)}\n")
+    buf.write("# columns: time (YYYY-MM), lat (degrees_north), lon (degrees_east), "
+              f"{var} (native units)\n")
+    times = np.array([f"{t.year:04d}-{t.month:02d}" for t in da.time.values])
+    vals = np.asarray(da.values, dtype=np.float64)
+    nt, ni, nj = vals.shape
+    T, I, J = np.meshgrid(np.arange(nt), np.arange(ni), np.arange(nj), indexing="ij")
+    df = pd.DataFrame({
+        "time": times[T.ravel()],
+        "lat": np.round(lat[I.ravel()].astype(float), 4),
+        "lon": np.round(lon[J.ravel()].astype(float), 4),
+        var: vals.ravel(),
+    })
+    df.to_csv(buf, index=False, float_format="%.6g", na_rep="")
     return Response(buf.getvalue().encode(), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{stem}.csv"'})
 

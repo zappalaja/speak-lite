@@ -6,7 +6,7 @@
 <title>SPEAR-MED Viewer</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-<link rel="stylesheet" href="style.css?v=8" />
+<link rel="stylesheet" href="style.css?v=9" />
 </head>
 <body>
 <div id="map"></div>
@@ -29,6 +29,7 @@
 </div>
 
 <button type="button" id="globe-btn" class="globe-btn" title="Experimental: view the field on a rotatable 3-D globe">Globe</button>
+<button type="button" id="box-btn" class="globe-btn box-btn" title="Drag a rectangle on the map, then download the data inside it (NetCDF/CSV) over a chosen time range">Draw a Box</button>
 <div id="grat-box" class="grat-box">
   <label><input type="checkbox" id="grat-lat" checked /> Latitude lines</label>
   <label><input type="checkbox" id="grat-lon" checked /> Longitude lines</label>
@@ -45,6 +46,56 @@
   <button type="button" id="play-btn" class="play-btn" title="Animate 12 months from the selected date">&#9654; Play year</button>
   <button type="button" id="continue-btn" class="play-btn" hidden title="Resume the paused animation">&#9654; Continue</button>
   <div id="play-timeline" class="play-timeline" hidden></div>
+</div>
+
+<button type="button" id="box-clear" class="clear-box" hidden title="Remove the drawn box">&#10005;&nbsp;Clear box</button>
+
+<div id="box-card" class="box-card" hidden>
+  <div class="box-card-head" id="box-card-head">
+    <span>Box extraction <span class="info-i" id="box-info">&#9432;</span></span>
+    <button type="button" class="ts-float-close" id="box-card-close" title="Remove the box">&#10005;</button>
+  </div>
+  <div class="box-card-body">
+    <div class="box-sel" id="box-sel"></div>
+    <div class="box-corners">
+      <div class="box-corner">
+        <div class="box-corner-title">NW corner</div>
+        <label>lat <input type="number" id="box-nw-lat" data-edge="north" step="0.01" min="0" max="90" /> <button type="button" class="box-hemi" data-kind="lat" title="Click to switch hemisphere">°N</button></label>
+        <label>lon <input type="number" id="box-nw-lon" data-edge="west" step="0.01" min="0" max="180" /> <button type="button" class="box-hemi" data-kind="lon" title="Click to switch hemisphere">°E</button></label>
+      </div>
+      <div class="box-corner">
+        <div class="box-corner-title">NE corner</div>
+        <label>lat <input type="number" id="box-ne-lat" data-edge="north" step="0.01" min="0" max="90" /> <button type="button" class="box-hemi" data-kind="lat" title="Click to switch hemisphere">°N</button></label>
+        <label>lon <input type="number" id="box-ne-lon" data-edge="east" step="0.01" min="0" max="180" /> <button type="button" class="box-hemi" data-kind="lon" title="Click to switch hemisphere">°E</button></label>
+      </div>
+      <div class="box-corner">
+        <div class="box-corner-title">SW corner</div>
+        <label>lat <input type="number" id="box-sw-lat" data-edge="south" step="0.01" min="0" max="90" /> <button type="button" class="box-hemi" data-kind="lat" title="Click to switch hemisphere">°N</button></label>
+        <label>lon <input type="number" id="box-sw-lon" data-edge="west" step="0.01" min="0" max="180" /> <button type="button" class="box-hemi" data-kind="lon" title="Click to switch hemisphere">°E</button></label>
+      </div>
+      <div class="box-corner">
+        <div class="box-corner-title">SE corner</div>
+        <label>lat <input type="number" id="box-se-lat" data-edge="south" step="0.01" min="0" max="90" /> <button type="button" class="box-hemi" data-kind="lat" title="Click to switch hemisphere">°N</button></label>
+        <label>lon <input type="number" id="box-se-lon" data-edge="east" step="0.01" min="0" max="180" /> <button type="button" class="box-hemi" data-kind="lon" title="Click to switch hemisphere">°E</button></label>
+      </div>
+    </div>
+    <div class="box-grid" id="box-grid" title="The box snaps to the model grid: every grid-cell centre inside it is extracted (the nearest cell if the box is narrower than one). These are the exact coordinates the file will contain."></div>
+    <label class="box-lock" title="Freeze the box: no dragging, resizing, editing or clearing until unticked">
+      <input type="checkbox" id="box-lock" /> Lock in place
+    </label>
+    <div class="box-cells" id="box-cells"></div>
+    <div class="ts-range box-range">
+      <span>Months</span>
+      <input type="month" id="box-start" />
+      <span>to</span>
+      <input type="month" id="box-end" />
+    </div>
+    <div class="box-note" id="box-note"></div>
+    <div class="ts-card-actions box-actions">
+      <button type="button" id="box-dl-nc" title="NetCDF with full metadata">&#8595; NetCDF</button>
+      <button type="button" id="box-dl-csv" title="CSV (time, lat, lon, value) with metadata header">&#8595; CSV</button>
+    </div>
+  </div>
 </div>
 
 <button type="button" id="merge-plots" class="merge-plots" hidden>Merge Plots</button>
@@ -71,7 +122,7 @@
 </div>
 
 <div class="panel" id="panel">
-  <div class="panel-title"><a class="brand-link" href="https://www.gfdl.noaa.gov/spear/" target="_blank" rel="noopener" title="Open the NOAA GFDL SPEAR homepage">SPEAR-MED</a> <span class="sub">GFDL large ensemble · v29</span></div>
+  <div class="panel-title"><a class="brand-link" href="https://www.gfdl.noaa.gov/spear/" target="_blank" rel="noopener" title="Open the NOAA GFDL SPEAR homepage">SPEAR-MED</a> <span class="sub">GFDL large ensemble · v31</span></div>
 
   <div class="row row-col">
     <span class="group-hint" title="GFDL AM4.0, 0.5&deg; Resolution">Atmospheric (Monthly)</span>
@@ -202,6 +253,6 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="config.js"></script>
-<script src="app.js?v=30"></script>
+<script src="app.js?v=31"></script>
 </body>
 </html>

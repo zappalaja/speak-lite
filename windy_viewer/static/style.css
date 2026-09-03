@@ -23,7 +23,7 @@
 
 /* fixed chrome: panel, floating buttons/bars, overlays */
 .panel, .play-bar, .grat-box, .globe-btn, .globe-note, .data-access,
-.ask-bubble, .merge-plots, .clear-pins, .load-box, .globe-hint {
+.ask-bubble, .merge-plots, .clear-pins, .clear-box, .load-box, .globe-hint {
   zoom: var(--ui-scale);
 }
 /* map/globe-anchored cards: scale the CONTENT, not the positioned box,
@@ -807,6 +807,164 @@ html, body {
   border-color: #e66767;
 }
 
+/* ---------- draw-a-box subset ---------- */
+/* compound selectors: .globe-btn (defined later) must not override these */
+.globe-btn.box-btn { top: 64px; } /* directly under the Globe/Map button */
+.globe-btn.box-btn.active { border-color: #ffd166; color: #ffd166; }
+#map.box-drawing, #map.box-drawing * { cursor: crosshair !important; }
+#globe-view.box-drawing #globe-canvas { cursor: crosshair !important; }
+.box-rect { cursor: move; }
+.box-handle {
+  width: 14px !important;
+  height: 14px !important;
+  margin-left: -7px !important;
+  margin-top: -7px !important;
+  background: #ffd166;
+  border: 2px solid #1a1a19;
+  border-radius: 3px;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.6);
+}
+.box-handle.nw, .box-handle.se { cursor: nwse-resize; }
+.box-handle.ne, .box-handle.sw { cursor: nesw-resize; }
+.clear-box {
+  position: fixed;
+  bottom: 92px; /* above the Access SPEAR Data link */
+  left: 12px;
+  z-index: 1100;
+  padding: 9px 16px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--ink-2);
+  font: 600 13px system-ui, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.4);
+}
+.clear-box:hover { color: var(--ink); background: #2e2e2c; border-color: #e66767; }
+.clear-box[hidden] { display: none; }
+.box-card {
+  position: fixed;
+  top: 84px;
+  right: 16px;
+  z-index: 1160;
+  width: 330px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+  color: var(--ink);
+  font: 13px system-ui, sans-serif;
+}
+.box-card[hidden] { display: none; }
+.box-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  font: 650 13px system-ui, sans-serif;
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  user-select: none;
+}
+.box-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px 14px 12px;
+}
+.box-sel { color: var(--ink-2); font-size: 12px; line-height: 1.4; }
+.box-corners {
+  display: grid;
+  grid-template-columns: 1fr 1fr; /* laid out like the box: NW NE / SW SE */
+  gap: 8px 10px;
+}
+.box-corner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.box-corner-title { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.box-corner label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.box-hemi {
+  min-width: 30px;
+  padding: 3px 4px;
+  background: #2a2a29;
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: 600 11.5px system-ui, sans-serif;
+  cursor: pointer;
+}
+.box-hemi:hover:not(:disabled) { border-color: #ffd166; }
+.box-hemi:disabled { opacity: 0.4; cursor: not-allowed; }
+.box-corner input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  background: #242423;
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font: 12px system-ui, sans-serif;
+}
+.box-grid {
+  color: var(--ink-2);
+  font: 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  line-height: 1.5;
+  padding: 6px 8px;
+  background: rgba(255, 209, 102, 0.06);
+  border-left: 2px solid #ffd166;
+  border-radius: 0 6px 6px 0;
+  white-space: pre-line;
+}
+.box-grid:empty { display: none; }
+.box-lock {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.box-lock input[type="checkbox"] { accent-color: #ffd166; width: 15px; height: 15px; margin: 0; }
+.box-corner input[type="number"]:disabled { opacity: 0.4; cursor: not-allowed; }
+.box-handle.locked { background: #7b7b76; cursor: not-allowed; }
+.box-rect.locked { cursor: default; }
+.ts-float-close:disabled { opacity: 0.35; cursor: not-allowed; }
+.ts-float-close:disabled:hover { color: var(--muted); }
+.clear-box:disabled, .clear-box:disabled:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border-color: var(--border);
+}
+.globe-btn.box-btn:disabled, .globe-btn.box-btn:disabled:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border-color: var(--border);
+}
+.box-cells { color: var(--muted); font-size: 12px; }
+.box-cells.over { color: #e66767; }
+.box-range { flex-wrap: wrap; }
+.box-note { color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.box-note:empty { display: none; }
+.box-actions { padding: 0; }
+.box-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+
 /* ---------- experimental globe view ---------- */
 #globe-view {
   position: fixed;
@@ -902,7 +1060,7 @@ html, body {
 }
 .grat-box {
   position: fixed;
-  top: 64px; /* directly under the Globe/Map button */
+  top: 118px; /* under the Globe/Map and Draw-a-Box buttons */
   left: 334px;
   z-index: 1100;
   display: flex;
@@ -922,11 +1080,11 @@ html, body {
   cursor: pointer;
   white-space: nowrap;
 }
-.rotate-btn { top: 148px; } /* below the lat/lon toggles */
+.rotate-btn { top: 202px; } /* below the lat/lon toggles */
 .rotate-btn[hidden] { display: none; }
 .globe-note {
   position: fixed;
-  top: 202px;
+  top: 256px;
   left: 334px;
   z-index: 1100;
   max-width: 190px;
