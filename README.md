@@ -9,7 +9,7 @@ SST) · ensemble member / mean / spread / anomaly statistics · A−B compare
 mode · wind particle animation · rotatable 3-D globe view · virtual stations
 with time-series extraction and merged plots · year playback · value
 filtering · unit conversion · NetCDF/CSV downloads with full source
-metadata · toggleable graticule · **SPEAK**, a rate-limited RAG chatbot
+metadata · **SPEAK**, a rate-limited RAG chatbot
 (Gemini) that sees the on-screen selection statistics.
 
 ## Layout
