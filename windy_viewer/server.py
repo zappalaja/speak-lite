@@ -471,7 +471,7 @@ def field(
     if cfg["plev"]:
         # The store chunks the level dimension in groups of 9, so a single
         # level costs the whole group's download anyway. Load the group
-        # once and cache every level in it — sibling levels become free.
+        # once and cache every level in it. Sibling levels become free.
         plevs = ds.plev.values
         idx = int(np.argmin(np.abs(plevs - plev * 100.0)))
         g0 = (idx // 9) * 9
@@ -644,7 +644,7 @@ def _to_netcdf_bytes(ds_out: xr.Dataset) -> bytes:
     os.close(fd)
     # The engine must create the file itself — an existing empty file is
     # not valid HDF5 and the write fails. (netcdf4 engine: h5netcdf needs
-    # h5py, which is absent from the spear env.)
+    # h5py.)
     Path(path).unlink()
     try:
         ds_out.to_netcdf(path, engine="netcdf4")
@@ -783,14 +783,14 @@ def download(
 # ---------------------------------------------------------------- time series
 # EXPERIMENTAL: station time-series extraction. Time is chunked in steps
 # of ONE month in the store, so a series costs one chunk download per
-# month (x30 for ensemble statistics) — extraction runs as a background
+# month (x30 for ensemble statistics). Extraction runs as a background
 # job with real progress, batched by BATCH_MONTHS.
 # Hard cap: 10 years per extraction (any statistic). Env-overridable.
 TS_MAX_MONTHS = int(os.environ.get("TS_MAX_MONTHS", "120"))
 TS_MAX_STATIONS = 9
 TS_BATCH_MONTHS = 24
 
-# Station colors — must match STATION_PALETTE in app.js so pin badges,
+# Station colors: must match STATION_PALETTE in app.js so pin badges,
 # single-station plots and merged plots all agree.
 TS_PALETTE = ["#3987e5", "#e8833a", "#2fbf71", "#e0575b", "#a06ee0",
               "#e5c43a", "#56c8d8", "#e06ea8", "#96a84c"]
