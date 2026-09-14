@@ -2,7 +2,7 @@
 
 A Windy.com-style interactive viewer for the NOAA GFDL **SPEAR-MED large
 ensemble**, streaming data on demand from the public ArrayLake/Icechunk store
-(`GFDL/noaa-gfdl-spear-large-ensembles-pds`) — no local data files.
+(`GFDL/noaa-gfdl-spear-large-ensembles-pds`).
 
 **Features**: 16 monthly variables (atmosphere incl. pressure levels, ocean
 SST) · ensemble member / mean / spread / anomaly statistics · A−B compare
@@ -10,8 +10,7 @@ mode · wind particle animation · rotatable 3-D globe view · virtual stations
 with time-series extraction and merged plots · year playback · value
 filtering · unit conversion · NetCDF/CSV downloads with full source
 metadata · toggleable graticule · **SPEAK**, a rate-limited RAG chatbot
-(Gemini with Claude fallback) that sees the on-screen selection statistics
-(never raw grids).
+(Gemini) that sees the on-screen selection statistics.
 
 ## Layout
 
@@ -24,8 +23,8 @@ Containerfile    podman/docker build
 ```
 
 The viewer auto-starts the RAG service beside itself. Without the RAG
-service (or without an LLM key) everything still works — SPEAK degrades
-gracefully or stays hidden.
+service (or without an LLM key) everything still works. SPEAK will just
+stay hidden.
 
 ## Run locally
 
@@ -64,22 +63,11 @@ podman run --rm -p 8601:8601 --env-file .env \
   via the `CHAT_*` vars in `.env.example`.
 - RAM: ~2 GB is comfortable (embedding model + field buffers).
 
-## Secrets
+## Keys/Secrets
 
-`ARRAYLAKE_TOKEN` (required), `GEMINI_API_KEY` / `ANTHROPIC_API_KEY`
+`ARRAYLAKE_TOKEN` (required), `GEMINI_API_KEY`
 (optional, enables SPEAK), `CARTO_API_KEY` (optional; without it CARTO
-watermarks the basemap tiles — get a free key at
-https://carto.com/basemaps/apikey/ and register your site's domain with it;
-the key is served to the browser via `/config.js`). Loaded from `.env` at the repo root — which is
-git-ignored; only `.env.example` is committed.
-
-## Provenance
-
-Data: NOAA GFDL SPEAR large ensembles public dataset
-(https://noaa-gfdl-spear-large-ensembles-pds.s3.amazonaws.com). Model:
-Delworth et al. (2020), doi:10.1029/2019MS001895. Basemap © CARTO/OSM,
-labels © Esri. Borders/coastlines: Natural Earth (vendored in
-`windy_viewer/static/geo/`). The RAG index (`rag-service/chroma_db`) is
-built from published GFDL papers (largely CC BY 4.0 AGU/JAMES articles);
-the index stores text chunks of those papers for retrieval. Paper source
-files and ingestion tooling live in the parent project, not this repo.
+watermarks the basemap tiles. Get a free key at
+https://carto.com/basemaps/apikey/;
+the key is served to the browser via `/config.js`). Loaded from `.env` at the repo root (which is
+git-ignored); only `.env.example` is committed.
