@@ -1,6 +1,6 @@
 # SPEAK-Lite Visualization
 
-A Windy.com-style interactive viewer for the NOAA GFDL **SPEAR-MED large
+An interactive viewer for the **SPEAR-MED large
 ensemble**, streaming data on demand from the public ArrayLake/Icechunk store
 (`GFDL/noaa-gfdl-spear-large-ensembles-pds`).
 
