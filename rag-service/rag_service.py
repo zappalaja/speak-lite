@@ -22,7 +22,6 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 # --------- CONFIG (edit if needed) ----------
 # Default path for containerized deployment; override with CHROMA_PERSIST_DIR env var
-# For target system: CHROMA_PERSIST_DIR=/home/Jake.Zappala/SPEAR-RAG-Ingestion/chroma_db
 PERSIST_DIR = os.environ.get(
     "CHROMA_PERSIST_DIR",
     "/app/chroma_db",
@@ -142,7 +141,7 @@ def query(req: QueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------- CODE MODE SNIPPETS ----------
+# ---------- CODE REFERENCE SNIPPETS ----------
 # A second Chroma collection (same persist dir, same embedding model) indexing
 # the developer-approved snippets in CODE_SNIPPETS_DIR. Each .py file's leading
 # docstring is embedded for matching; the full code rides along as metadata.
