@@ -1,4 +1,4 @@
-# SPEAR Windy Viewer
+# SPEAK-Lite Visualization
 
 A Windy.com-style interactive viewer for the NOAA GFDL **SPEAR-MED large
 ensemble**, streaming data on demand from the public ArrayLake/Icechunk store
