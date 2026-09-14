@@ -453,7 +453,9 @@ map.getPane("labels").style.pointerEvents = "none";
 // "API key required" without it.
 const cartoKey = (window.SPEAR_CONFIG && window.SPEAR_CONFIG.cartoApiKey) || "";
 if (!cartoKey) console.warn("CARTO_API_KEY not set: basemap tiles will be watermarked");
-L.tileLayer(
+// crossOrigin: tiles are drawn into a canvas for the PNG export; both
+// CARTO and Esri send Access-Control-Allow-Origin: * so this is safe.
+const basemapLayer = L.tileLayer(
   "https://{s}.basemaps.cartocdn.com/rastertiles/dark_nolabels/{z}/{x}/{y}{r}.png" +
     (cartoKey ? "?key=" + encodeURIComponent(cartoKey) : ""),
   {
@@ -462,18 +464,20 @@ L.tileLayer(
       '&copy; <a href="https://carto.com/attributions">CARTO</a> · SPEAR-MED (NOAA GFDL)',
     subdomains: "abcd",
     maxZoom: 20,
+    crossOrigin: true,
   }
 ).addTo(map);
 
 // Place labels above the data so geography stays readable through the
 // field. Esri's Dark Gray Reference layer uses English place names
 // everywhere (CARTO's label tiles use local-language names).
-L.tileLayer(
+const esriLabelLayer = L.tileLayer(
   "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
   {
     pane: "labels",
     maxNativeZoom: 12,
     attribution: "Labels &copy; Esri",
+    crossOrigin: true,
   }
 ).addTo(map);
 
@@ -653,6 +657,12 @@ function saveState() {
         job: p.tsReady ? p.tsJob : null,
       })),
       grat: { lat: gratState.lat, lon: gratState.lon },
+      contours: (typeof contours !== "undefined") ? {
+        on: contours.on, mode: contours.mode, interval: contours.interval,
+        custom: contours.custom, colorMode: contours.colorMode, color: contours.color,
+        width: contours.width, opacity: contours.opacity, labels: contours.labels,
+        casing: contours.casing, banded: contours.banded,
+      } : null,
       box: (typeof box !== "undefined" && box.bounds)
         ? { ...box.bounds, start: box.range.start, end: box.range.end, locked: box.locked }
         : null,
@@ -943,7 +953,10 @@ function applyOverlayUrl(url) {
   }
 }
 
+const painted = { d: null, lut: null }; // what the overlay currently shows
 function renderOverlay(d, lut, seq, filter) {
+  painted.d = d;
+  painted.lut = lut;
   renderFieldToURL(d, lut, filter).then((url) => {
     if (!url) return;
     if (seq !== loadSeq) {
@@ -967,8 +980,12 @@ function renderLegend(spec) {
   const { width: W, height: H } = canvas;
   const img = ctx.createImageData(W, H);
   const rgba = [0, 0, 0, 0];
+  // banded contour fill: the legend steps at the same levels as the map
+  const bands = contoursBandedActive() && currentDisplay
+    ? contourBandLevels(currentDisplay, { min: spec.min, max: spec.max }) : null;
   for (let c = 0; c < W; c++) {
-    const v = spec.min + ((spec.max - spec.min) * c) / (W - 1);
+    let v = spec.min + ((spec.max - spec.min) * c) / (W - 1);
+    if (bands) v = contourBandRep(v, bands, spec.min, spec.max);
     spec.color(v, rgba);
     for (let r = 0; r < H; r++) {
       const k = (r * W + c) * 4;
@@ -1028,7 +1045,7 @@ function scheduleFilterRender(immediate) {
   filterRenderTimer = setTimeout(() => {
     filterRenderTimer = null;
     if (currentDisplay && currentLUT) {
-      renderOverlay(currentDisplay, currentLUT, loadSeq, state.filter);
+      renderOverlay(currentDisplay, effectiveLUT(), loadSeq, state.filter);
     }
   }, immediate ? 0 : 250);
 }
@@ -1664,8 +1681,7 @@ async function loadField() {
       await new Promise((r) => setTimeout(r, 0));
       if (seq !== loadSeq) return;
       currentLUT = buildDiffLUT(limit);
-      renderOverlay(currentDisplay, currentLUT, seq, state.filter);
-      renderMeta();
+      renderMeta(); // legend, contour levels, then the overlay paint
       ok = true;
     } else {
       // Particle wind follows the viewed level: ua/va at state.plev for
@@ -1692,12 +1708,11 @@ async function loadField() {
       await new Promise((r) => setTimeout(r, 0));
       if (seq !== loadSeq) return;
       currentLUT = lutForField(f);
-      renderOverlay(f, currentLUT, seq, state.filter);
+      renderMeta(); // legend, contour levels, then the overlay paint
       if (particlesEnabled()) {
         resetParticles();
         startParticles();
       }
-      renderMeta();
       ok = true;
     }
   } catch (err) {
@@ -1764,6 +1779,15 @@ function renderMeta() {
   }
   if (typeof updateTimeline === "function") updateTimeline();
   refreshReadout();
+  contoursUpdate({ noGlobe: true }); // levels follow the legend range / units
+  // Paint the overlay if the field is new or the colour table to paint
+  // with changed — e.g. a unit switch re-derives the contour levels and
+  // with them the banded fill. Playback frames are pre-rendered.
+  const wantLUT = effectiveLUT();
+  const inPlayback = typeof playback !== "undefined" && playback.frames;
+  if (currentLUT && !inPlayback && (painted.d !== currentDisplay || painted.lut !== wantLUT)) {
+    renderOverlay(currentDisplay, wantLUT, loadSeq, state.filter);
+  }
   if (typeof globe !== "undefined" && globe.open) globeRender(false);
 }
 
@@ -2065,6 +2089,8 @@ async function init() {
   if (SAVED && SAVED.opacity != null) el("opacity").value = SAVED.opacity;
   if (SAVED && SAVED.particles != null) el("particles-toggle").checked = SAVED.particles;
   el("compare-toggle").checked = state.compare;
+  if (SAVED && SAVED.contours) contoursRestore(SAVED.contours);
+  contoursInitUI();
   if (SAVED && SAVED.box && ["south", "north", "west", "east"].every((k) => Number.isFinite(SAVED.box[k]))) {
     box.range.start = typeof SAVED.box.start === "string" ? SAVED.box.start : "";
     box.range.end = typeof SAVED.box.end === "string" ? SAVED.box.end : "";
@@ -2154,6 +2180,7 @@ async function init() {
   };
   el("dl-nc").addEventListener("click", () => download("nc"));
   el("dl-csv").addEventListener("click", () => download("csv"));
+  el("dl-png").addEventListener("click", () => downloadViewPNG());
   el("particles-toggle").addEventListener("change", () => {
     if (particlesEnabled()) { resetParticles(); startParticles(); }
     else stopParticles();
@@ -2565,6 +2592,7 @@ function stepPlayback() {
   [...el("play-timeline").children].forEach((c, i) =>
     c.classList.toggle("active", i === playback.idx)
   );
+  contoursUpdate({ noGlobe: true }); // cached per frame after the first pass
   if (typeof globe !== "undefined" && globe.open) globeRender(false);
   setStatus(
     `▶ ${statPrefix(fr.field)}${fr.field.label} · ${selLabel(fr.field)} ` +
@@ -2668,7 +2696,7 @@ async function startPlayback(resume) {
     playback.frames = [];
     for (let i = 0; i < fields.length; i++) {
       if (playback.abort) throw new Error("cancelled");
-      const url = await renderFieldToURL(fields[i], lut, state.filter);
+      const url = await renderFieldToURL(fields[i], effectiveLUT(lut, fields[i]), state.filter);
       playback.frames.push({ field: fields[i], wind: winds[i] || null, url });
       el("load-pct").textContent = `${90 + Math.round(((i + 1) / fields.length) * 10)}%`;
     }
@@ -2743,7 +2771,7 @@ function globeRender(fast) {
   const cx = W / 2, cy = H / 2;
   const phi0 = globe.lat0 * D2R, lam0 = globe.lon0 * D2R;
   const sp0 = Math.sin(phi0), cp0 = Math.cos(phi0);
-  const d = currentDisplay, grid = d._grid, lut = currentLUT;
+  const d = currentDisplay, grid = d._grid, lut = effectiveLUT();
   const fLo = state.filter.lo, fHi = state.filter.hi;
   const img = ctx.createImageData(W, H);
   const px = img.data;
@@ -2889,6 +2917,15 @@ function globeRender(fast) {
   drawLines(globe.coast, "rgba(232,230,223,0.66)", 1.2);
   drawLines(globe.borders, "rgba(217,215,207,0.62)", 1.0);
   if (globe.zoom >= 2.0) drawLines(globe.states, "rgba(201,199,191,0.55)", 0.9);
+  // contour isolines of the displayed field (same lines as the flat map)
+  if (contours.on && contours.levels.length) {
+    ctx.globalAlpha = contours.opacity;
+    if (contours.casing) {
+      for (const lv of contours.levels) drawLines(contourGeo(lv), CONTOUR_CASING, contours.width + 2.2);
+    }
+    for (const lv of contours.levels) drawLines(contourGeo(lv), lv.color, contours.width);
+    ctx.globalAlpha = 1;
+  }
   // graticule every 30°
   ctx.strokeStyle = "rgba(255,255,255,0.08)";
   ctx.lineWidth = scale;
@@ -4346,6 +4383,7 @@ function boxUpdateSize() {
   }
   out.classList.toggle("over", over);
   for (const id of ["box-dl-nc", "box-dl-csv"]) el(id).disabled = over || !!box.pending;
+  el("box-dl-png").disabled = !!box.pending || !!snap.busy;
   boxRenderGrid();
 }
 
@@ -4562,6 +4600,7 @@ el("box-clear").addEventListener("click", boxClear);
 el("box-card-close").addEventListener("click", boxClear);
 el("box-dl-nc").addEventListener("click", () => boxDownload("nc"));
 el("box-dl-csv").addEventListener("click", () => boxDownload("csv"));
+el("box-dl-png").addEventListener("click", () => boxDownloadPNG());
 for (const input of document.querySelectorAll(".box-corner input[data-edge]")) {
   input.addEventListener("change", () => boxCornerChanged(input));
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
@@ -4613,3 +4652,900 @@ el("box-info").title = BOX_INFO_TEXT;
     e.preventDefault();
   });
 })();
+
+
+// -------------------------------------------------------- contours
+// Marching-squares isolines of the displayed field (the A−B difference in
+// compare mode), drawn above the data on the flat map and the globe.
+// Levels are entered in the display units and converted to the field's
+// base units; the field is contoured as loaded (the value filter does
+// not apply). Lines are cached on the field object per level set, so
+// playback frames are contoured once.
+const contours = {
+  on: false,
+  mode: "auto",        // auto | interval | custom
+  interval: "",        // display units, as typed
+  custom: "",          // comma-separated display values, as typed
+  colorMode: "single", // single | value (colormap color at the level)
+  color: "#ffe066",    // distinct from the light coastline/border strokes
+  width: 1.2,
+  opacity: 0.9,
+  casing: true,        // dark outline under each line so it reads over any fill
+  banded: true,        // flat fill colour between levels (filled-contour look)
+  labels: true,
+  levels: [],          // [{value (base), display, color, lines: [[[lat, lon], ...], ...]}]
+  layer: null,         // L.layerGroup of lines on the map
+  labelLayer: null,    // L.layerGroup of value labels for the current view
+};
+const CONTOUR_CASING = "rgba(0, 0, 0, 0.6)";
+const CONTOUR_MAX_LEVELS = 60;
+const CONTOUR_MAX_LABELS = 90;
+map.createPane("contours").style.zIndex = 435; // above borders (430), below particles (440)
+map.getPane("contours").style.pointerEvents = "none";
+const contourRenderer = L.canvas({ pane: "contours" });
+const CONTOUR_INFO_TEXT =
+  "Isolines of the field on screen (the A − B difference in compare mode). " +
+  "Auto picks about eight evenly spaced levels across the legend range; " +
+  "Interval spaces them every N units; Custom takes an explicit list. " +
+  "Values are in the selected display units. Lines can share one color or " +
+  "take the colormap's color at their level, get a dark outline so they read " +
+  "over any fill, and carry value labels along them (map only; re-placed as " +
+  "you pan and zoom). The value filter does not affect contours.";
+
+function niceStep(x) {
+  if (!(x > 0) || !Number.isFinite(x)) return 1;
+  const k = Math.pow(10, Math.floor(Math.log10(x)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (x <= m * k * 1.0001) return m * k;
+  return 10 * k;
+}
+
+// Level spacing in display units for auto/interval modes (null = custom).
+function contourStep(d) {
+  if (contours.mode === "custom") return null;
+  if (contours.mode === "interval") {
+    const step = parseFloat(contours.interval);
+    return step > 0 ? step : NaN;
+  }
+  const spec = unitSpecFor(d.var);
+  const lo = convForDisplay(d, legendRange.min, spec), hi = convForDisplay(d, legendRange.max, spec);
+  return niceStep(Math.abs(hi - lo) / 8);
+}
+
+function contourCustomList() {
+  return contours.custom.split(/[,;\s]+/).filter(Boolean).map(Number).filter(Number.isFinite);
+}
+
+// ---- banded (filled-contour) colouring: between two consecutive levels
+// the fill takes one flat colour — the colormap sampled at the band's
+// midpoint — so the map reads like a classic filled-contour plot.
+function contoursBandedActive() {
+  return contours.on && contours.banded;
+}
+
+// Level values (base units) strictly inside [lo, hi], on the same grid of
+// levels as the drawn lines, independent of the field's own range so every
+// playback frame shares one fill.
+function contourBandLevels(d, range) {
+  const spec = unitSpecFor(d.var);
+  const toDisp = (v) => convForDisplay(d, v, spec);
+  const toBase = (v) => (isDeltaLike(d) ? v / spec.scale : (v - spec.offset) / spec.scale);
+  const dlo = Math.min(toDisp(range.min), toDisp(range.max));
+  const dhi = Math.max(toDisp(range.min), toDisp(range.max));
+  let vals;
+  const step = contourStep(d);
+  if (step === null) {
+    vals = contourCustomList();
+  } else {
+    if (!(step > 0)) return [];
+    let st = step;
+    if ((dhi - dlo) / st > 200) st = niceStep((dhi - dlo) / 200);
+    vals = [];
+    for (let k = Math.ceil(dlo / st - 1e-9); k * st <= dhi + 1e-9; k++) vals.push(+(k * st).toPrecision(10));
+  }
+  return vals.map(toBase).filter((v) => v > range.min && v < range.max).sort((a, b) => a - b);
+}
+
+// Representative value for v given ascending band levels: the band's
+// midpoint, except that the two outer bands take the colormap's own end
+// (so e.g. precipitation below the first level stays transparent, as in
+// the smooth map, and the top band shows the full extreme colour).
+function contourBandRep(v, levels, min, max) {
+  let b = 0;
+  while (b < levels.length && v >= levels[b]) b++;
+  if (b === 0) return min;
+  if (b === levels.length) return max;
+  return (levels[b - 1] + levels[b]) / 2;
+}
+
+function contourBandLUT(base, d) {
+  const levels = contourBandLevels(d, base);
+  if (!levels.length) return base;
+  const key = levels.join(",");
+  const c = contours._band;
+  if (c && c.base === base && c.key === key) return c.lut;
+  const N = base.last + 1;
+  const data = new Uint8ClampedArray(N * 4);
+  for (let i = 0; i < N; i++) {
+    const rep = contourBandRep(base.min + i / base.scale, levels, base.min, base.max);
+    const ri = Math.max(0, Math.min(base.last, ((rep - base.min) * base.scale) | 0));
+    data[i * 4] = base.data[ri * 4];
+    data[i * 4 + 1] = base.data[ri * 4 + 1];
+    data[i * 4 + 2] = base.data[ri * 4 + 2];
+    data[i * 4 + 3] = base.data[ri * 4 + 3];
+  }
+  const lut = { min: base.min, max: base.max, scale: base.scale, last: base.last, data };
+  contours._band = { base, key, lut };
+  return lut;
+}
+
+// The LUT the overlay/globe should paint with: banded while contours are
+// on with the banded fill enabled, otherwise the smooth one.
+function effectiveLUT(base = currentLUT, d = currentDisplay) {
+  if (!base || !d || !contoursBandedActive()) return base;
+  return contourBandLUT(base, d);
+}
+
+// Level values for the field: [{display, value}] sorted ascending.
+function contourLevelValues(d) {
+  const spec = unitSpecFor(d.var);
+  const toDisp = (v) => convForDisplay(d, v, spec);
+  const toBase = (v) => (isDeltaLike(d) ? v / spec.scale : (v - spec.offset) / spec.scale);
+  const g = d._grid;
+  let vmin = Infinity, vmax = -Infinity;
+  for (let i = 0; i < g.length; i++) {
+    const v = g[i];
+    if (v === v) { if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+  }
+  if (!(vmin < vmax)) return { levels: [], note: "field has no range to contour" };
+  const dmin = Math.min(toDisp(vmin), toDisp(vmax));
+  const dmax = Math.max(toDisp(vmin), toDisp(vmax));
+  let vals = [];
+  let note = "";
+  let step = contourStep(d);
+  if (step === null) {
+    vals = contourCustomList();
+    if (!vals.length) note = "type levels as numbers separated by commas";
+  } else {
+    if (!(step > 0)) return { levels: [], note: "enter a positive interval" };
+    let count = Math.floor(dmax / step) - Math.ceil(dmin / step) + 1;
+    if (count > CONTOUR_MAX_LEVELS) {
+      const minStep = niceStep((dmax - dmin) / CONTOUR_MAX_LEVELS);
+      note = `interval ${step} would give ${count} levels; using ${minStep}`;
+      step = Math.max(step, minStep);
+    }
+    for (let k = Math.ceil(dmin / step - 1e-9); k * step <= dmax + 1e-9; k++) {
+      vals.push(+(k * step).toPrecision(10));
+    }
+  }
+  vals = [...new Set(vals)].sort((a, b) => a - b);
+  if (vals.length > CONTOUR_MAX_LEVELS) {
+    note = `showing the first ${CONTOUR_MAX_LEVELS} of ${vals.length} levels`;
+    vals = vals.slice(0, CONTOUR_MAX_LEVELS);
+  }
+  return { levels: vals.map((disp) => ({ display: disp, value: toBase(disp) })), note };
+}
+
+// Marching squares over the whole grid for every level in one pass. The
+// grid wraps in longitude (column nlon-1 joins column 0 at lon0 + 360),
+// so the last column's cell is contoured too and lines end exactly at
+// the ±180 seam. Returns per-level flat segment arrays
+// [keyA, latA, lonA, keyB, latB, lonB, ...] with edge keys for linking.
+const MS_CASES = {
+  1: [[3, 0]], 2: [[0, 1]], 3: [[3, 1]], 4: [[1, 2]], 6: [[0, 2]], 7: [[3, 2]],
+  8: [[2, 3]], 9: [[0, 2]], 11: [[1, 2]], 12: [[1, 3]], 13: [[0, 1]], 14: [[3, 0]],
+};
+function contourSegments(d, levels) {
+  const { nlat, nlon, lat0, dlat, lon0, dlon } = d;
+  const g = d._grid;
+  const nl = levels.length;
+  const segs = levels.map(() => []);
+  const W = nlon + 1;
+  const pt = [null, null, null, null]; // bottom, right, top, left
+  for (let i = 0; i < nlat - 1; i++) {
+    const latA = lat0 + i * dlat, latB = latA + dlat;
+    const rowA = i * nlon, rowB = rowA + nlon;
+    for (let j = 0; j < nlon; j++) {
+      const j1 = j + 1 === nlon ? 0 : j + 1;
+      const v00 = g[rowA + j], v10 = g[rowA + j1], v01 = g[rowB + j], v11 = g[rowB + j1];
+      if (v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) continue;
+      const cmin = Math.min(v00, v10, v01, v11), cmax = Math.max(v00, v10, v01, v11);
+      const lonA = lon0 + j * dlon, lonB = lonA + dlon;
+      const kb = (i * W + j) * 2, kr = (i * W + j + 1) * 2 + 1, kt = ((i + 1) * W + j) * 2, kl = (i * W + j) * 2 + 1;
+      for (let k = 0; k < nl; k++) {
+        const lv = levels[k].value;
+        if (lv < cmin || lv > cmax) continue;
+        const c = (v00 >= lv ? 1 : 0) | (v10 >= lv ? 2 : 0) | (v11 >= lv ? 4 : 0) | (v01 >= lv ? 8 : 0);
+        if (c === 0 || c === 15) continue;
+        let pairs = MS_CASES[c];
+        if (!pairs) { // saddles: disambiguate with the cell centre
+          const high = (v00 + v10 + v01 + v11) / 4 >= lv;
+          pairs = c === 5 ? (high ? [[0, 1], [2, 3]] : [[3, 0], [1, 2]])
+                          : (high ? [[3, 0], [1, 2]] : [[0, 1], [2, 3]]);
+        }
+        pt[0] = [kb, latA, lonA + dlon * ((lv - v00) / (v10 - v00))];
+        pt[1] = [kr, latA + dlat * ((lv - v10) / (v11 - v10)), lonB];
+        pt[2] = [kt, latB, lonA + dlon * ((lv - v01) / (v11 - v01))];
+        pt[3] = [kl, latA + dlat * ((lv - v00) / (v01 - v00)), lonA];
+        const out = segs[k];
+        for (const [ea, eb] of pairs) {
+          const a = pt[ea], b = pt[eb];
+          out.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+        }
+      }
+    }
+  }
+  return segs;
+}
+
+// Join segments that share an edge key into polylines (open lines from
+// their endpoints first, then closed loops).
+function contourLink(seg) {
+  const n = seg.length / 6;
+  const pts = new Map();
+  const adj = new Map();
+  for (let s = 0; s < n; s++) {
+    const ka = seg[s * 6], kb = seg[s * 6 + 3];
+    if (!pts.has(ka)) pts.set(ka, [seg[s * 6 + 1], seg[s * 6 + 2]]);
+    if (!pts.has(kb)) pts.set(kb, [seg[s * 6 + 4], seg[s * 6 + 5]]);
+    (adj.get(ka) || adj.set(ka, []).get(ka)).push(s);
+    (adj.get(kb) || adj.set(kb, []).get(kb)).push(s);
+  }
+  const used = new Uint8Array(n);
+  const lines = [];
+  const walk = (start) => {
+    const line = [pts.get(start)];
+    let cur = start;
+    for (;;) {
+      const list = adj.get(cur);
+      let next = -1;
+      for (const s of list) if (!used[s]) { next = s; break; }
+      if (next < 0) break;
+      used[next] = 1;
+      cur = seg[next * 6] === cur ? seg[next * 6 + 3] : seg[next * 6];
+      line.push(pts.get(cur));
+    }
+    return line;
+  };
+  for (const [key, list] of adj) {
+    if (list.length === 1 && !used[list[0]]) lines.push(walk(key));
+  }
+  for (const [key, list] of adj) {
+    for (const s of list) if (!used[s]) lines.push(walk(key));
+  }
+  return lines;
+}
+
+function contourColorFor(value) {
+  if (contours.colorMode !== "value" || !currentLUT) return contours.color;
+  const lut = currentLUT;
+  let idx = ((value - lut.min) * lut.scale) | 0;
+  idx = Math.max(0, Math.min(lut.last, idx));
+  const li = idx * 4;
+  // lighten so the line stands out from the (translucent) fill of the same hue
+  const mix = (c) => Math.round(c * 0.65 + 255 * 0.35);
+  return `rgb(${mix(lut.data[li])}, ${mix(lut.data[li + 1])}, ${mix(lut.data[li + 2])})`;
+}
+
+// GeoJSON-shaped wrapper so the globe's cached unit-vector line drawer
+// can render a level's lines without per-frame trig.
+function contourGeo(lv) {
+  if (!lv._geo) {
+    lv._geo = {
+      features: [{
+        geometry: {
+          type: "MultiLineString",
+          coordinates: lv.lines.map((line) => line.map(([la, lo]) => [lo, la])),
+        },
+      }],
+    };
+  }
+  return lv._geo;
+}
+
+function contoursUpdate(opts = {}) {
+  const d = currentDisplay;
+  if (d) {
+    const unit = unitSpecFor(d.var).unit;
+    for (const u of document.querySelectorAll(".contour-unit")) u.textContent = unit;
+  }
+  if (!contours.on || !d || !d._grid) {
+    contours.levels = [];
+    contoursDraw();
+    contoursSummary("");
+    if (!opts.noGlobe && globe.open) globeScheduleFull();
+    return;
+  }
+  const { levels, note } = contourLevelValues(d);
+  const key = levels.map((l) => l.value).join(",");
+  let lines;
+  if (d._contours && d._contours.key === key) {
+    lines = d._contours.lines;
+  } else {
+    const t0 = performance.now();
+    lines = contourSegments(d, levels).map(contourLink);
+    d._contours = { key, lines, ms: performance.now() - t0 };
+  }
+  contours.levels = levels.map((l, k) => ({ ...l, lines: lines[k], color: contourColorFor(l.value) }));
+  contoursDraw();
+  const spec = unitSpecFor(d.var);
+  const shown = contours.levels.filter((l) => l.lines.length);
+  contoursSummary(
+    (shown.length
+      ? `${shown.length} level${shown.length === 1 ? "" : "s"} drawn: ` +
+        shown.map((l) => fmtTick(l.display)).join(", ") + ` ${spec.unit}`
+      : "no contour levels fall inside the field's range") +
+    (note ? ` — ${note}` : "")
+  );
+  if (!opts.noGlobe && globe.open) globeScheduleFull();
+}
+
+function contoursDraw() {
+  if (contours.layer) { contours.layer.remove(); contours.layer = null; }
+  if (contours.labelLayer) { contours.labelLayer.remove(); contours.labelLayer = null; }
+  if (!contours.on || !contours.levels.length) return;
+  const group = L.layerGroup();
+  const multis = contours.levels.map((lv) => {
+    const multi = [];
+    for (const off of [-360, 0, 360]) {
+      for (const line of lv.lines) multi.push(line.map(([la, lo]) => [la, lo + off]));
+    }
+    return multi;
+  });
+  // all casings first so they never cover another level's line
+  if (contours.casing) {
+    multis.forEach((multi) => {
+      if (!multi.length) return;
+      L.polyline(multi, {
+        renderer: contourRenderer, pane: "contours", color: CONTOUR_CASING,
+        weight: contours.width + 2.2, opacity: contours.opacity, interactive: false, smoothFactor: 1,
+      }).addTo(group);
+    });
+  }
+  multis.forEach((multi, k) => {
+    if (!multi.length) return;
+    L.polyline(multi, {
+      renderer: contourRenderer, pane: "contours", color: contours.levels[k].color,
+      weight: contours.width, opacity: contours.opacity, interactive: false, smoothFactor: 1,
+    }).addTo(group);
+  });
+  contours.layer = group.addTo(map);
+  contoursPlaceLabels();
+}
+
+// Value labels for the CURRENT view: walk every visible line and drop a
+// label every ~220 screen pixels along it, rotated to follow the line.
+// Re-placed on every pan/zoom, capped so a busy field doesn't flood.
+const CONTOUR_LABEL_SPACING = 220;
+function contoursPlaceLabels() {
+  if (contours.labelLayer) { contours.labelLayer.remove(); contours.labelLayer = null; }
+  if (!contours.on || !contours.labels || !contours.levels.length || globe.open) return;
+  const group = L.layerGroup();
+  const bounds = map.getBounds().pad(0.05);
+  let total = 0;
+  outer:
+  for (const lv of contours.levels) {
+    const text = fmtTick(lv.display);
+    for (const line of lv.lines) {
+      if (line.length < 6) continue;
+      for (const off of [-360, 0, 360]) {
+        let acc = CONTOUR_LABEL_SPACING * 0.45; // first label a little way in
+        let prev = null;
+        for (const [la, lo] of line) {
+          const ll = L.latLng(la, lo + off);
+          if (!bounds.contains(ll)) { prev = null; acc = CONTOUR_LABEL_SPACING * 0.45; continue; }
+          const pt = map.latLngToLayerPoint(ll);
+          if (prev) acc += pt.distanceTo(prev);
+          if (acc >= CONTOUR_LABEL_SPACING && prev) {
+            let deg = (Math.atan2(pt.y - prev.y, pt.x - prev.x) * 180) / Math.PI;
+            if (deg > 90) deg -= 180; else if (deg < -90) deg += 180; // never upside down
+            L.marker(ll, {
+              pane: "contours", interactive: false, keyboard: false,
+              icon: L.divIcon({
+                className: "contour-label",
+                html: `<span style="color:${lv.color};transform:translate(-50%,-50%) rotate(${deg.toFixed(0)}deg)">${text}</span>`,
+                iconSize: null,
+              }),
+            }).addTo(group);
+            acc = 0;
+            if (++total >= CONTOUR_MAX_LABELS) break outer;
+          }
+          prev = pt;
+        }
+      }
+    }
+  }
+  contours.labelLayer = group.addTo(map);
+}
+map.on("moveend zoomend", () => { if (contours.labels && contours.on) contoursPlaceLabels(); });
+
+function contoursSummary(text) {
+  el("contour-summary").textContent = text;
+}
+
+// ---- panel controls
+function contoursRestore(saved) {
+  if (typeof saved.on === "boolean") contours.on = saved.on;
+  if (["auto", "interval", "custom"].includes(saved.mode)) contours.mode = saved.mode;
+  if (typeof saved.interval === "string") contours.interval = saved.interval;
+  if (typeof saved.custom === "string") contours.custom = saved.custom;
+  if (["single", "value"].includes(saved.colorMode)) contours.colorMode = saved.colorMode;
+  if (/^#[0-9a-f]{6}$/i.test(saved.color || "")) contours.color = saved.color;
+  if (Number.isFinite(saved.width) && saved.width >= 0.5 && saved.width <= 6) contours.width = saved.width;
+  if (Number.isFinite(saved.opacity) && saved.opacity >= 0.1 && saved.opacity <= 1) contours.opacity = saved.opacity;
+  if (typeof saved.labels === "boolean") contours.labels = saved.labels;
+  if (typeof saved.casing === "boolean") contours.casing = saved.casing;
+  if (typeof saved.banded === "boolean") contours.banded = saved.banded;
+}
+
+function contoursSyncUI() {
+  el("contour-toggle").checked = contours.on;
+  el("contour-opts").hidden = !contours.on;
+  el("contour-interval-row").hidden = contours.mode !== "interval";
+  el("contour-custom-row").hidden = contours.mode !== "custom";
+  el("contour-interval").value = contours.interval;
+  el("contour-custom").value = contours.custom;
+  el("contour-color").value = contours.color;
+  el("contour-color").hidden = contours.colorMode !== "single";
+  el("contour-width").value = contours.width;
+  el("contour-opacity").value = Math.round(contours.opacity * 100);
+  el("contour-labels").checked = contours.labels;
+  el("contour-casing").checked = contours.casing;
+  el("contour-banded").checked = contours.banded;
+  const unit = currentDisplay ? unitSpecFor(currentDisplay.var).unit : "";
+  for (const u of document.querySelectorAll(".contour-unit")) u.textContent = unit;
+}
+
+function contoursChanged() {
+  contoursSyncUI();
+  saveState();
+  if (typeof playback !== "undefined" && playback.frames) discardPlayback(); // frames were rendered with the old fill
+  if (currentDisplay && currentLUT) renderMeta(); // legend + lines + overlay paint if the fill changed
+  else contoursUpdate();
+}
+
+function contoursInitUI() {
+  buildSeg("contour-mode-seg",
+    [["auto", "Auto"], ["interval", "Interval"], ["custom", "Custom"]],
+    contours.mode, (v) => { contours.mode = v; contoursChanged(); },
+    { auto: "About eight evenly spaced levels across the legend range.",
+      interval: "Levels every N display units (multiples of N).",
+      custom: "An explicit comma-separated list of levels in display units." });
+  buildSeg("contour-color-seg",
+    [["single", "Single"], ["value", "By value"]],
+    contours.colorMode, (v) => { contours.colorMode = v; contoursChanged(); },
+    { single: "All lines in the chosen color.",
+      value: "Each line takes the colormap's color at its level (lightened)." });
+  el("contour-toggle").addEventListener("change", (e) => { contours.on = e.target.checked; contoursChanged(); });
+  el("contour-interval").addEventListener("change", (e) => { contours.interval = e.target.value.trim(); contoursChanged(); });
+  el("contour-custom").addEventListener("change", (e) => { contours.custom = e.target.value.trim(); contoursChanged(); });
+  for (const id of ["contour-interval", "contour-custom", "contour-width"]) {
+    el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+  }
+  el("contour-color").addEventListener("input", (e) => {
+    contours.color = e.target.value;
+    // live recolor without recomputing the lines
+    for (const lv of contours.levels) lv.color = contourColorFor(lv.value);
+    contoursDraw();
+    if (globe.open) globeScheduleFull();
+  });
+  el("contour-color").addEventListener("change", () => saveState());
+  el("contour-width").addEventListener("change", (e) => {
+    const w = parseFloat(e.target.value);
+    contours.width = Number.isFinite(w) ? Math.min(6, Math.max(0.5, w)) : 1.2;
+    contoursSyncUI(); saveState(); contoursDraw();
+    if (globe.open) globeScheduleFull();
+  });
+  el("contour-opacity").addEventListener("input", (e) => {
+    contours.opacity = e.target.value / 100;
+    contoursDraw();
+  });
+  el("contour-opacity").addEventListener("change", () => { saveState(); if (globe.open) globeScheduleFull(); });
+  el("contour-labels").addEventListener("change", (e) => { contours.labels = e.target.checked; saveState(); contoursPlaceLabels(); });
+  el("contour-banded").addEventListener("change", (e) => { contours.banded = e.target.checked; contoursChanged(); });
+  el("contour-casing").addEventListener("change", (e) => {
+    contours.casing = e.target.checked; saveState(); contoursDraw();
+    if (globe.open) globeScheduleFull();
+  });
+  el("contour-info").addEventListener("click", (e) => {
+    e.preventDefault(); // inside the toggle's <label>: don't flip the checkbox
+    e.stopPropagation();
+    showInfoPopover(CONTOUR_INFO_TEXT, e.clientX, e.clientY);
+  });
+  el("contour-info").title = CONTOUR_INFO_TEXT;
+  contoursSyncUI();
+}
+
+
+// -------------------------------------------------------- PNG export
+// Composites exactly what the view shows — basemap tiles, the data
+// overlay, canvas layers (borders/graticule, contours, wind trails), the
+// Esri label tiles, the box outline and every DOM label (place names,
+// lat/lon labels, contour values, station cards) — into a PNG, with no
+// panels or controls. Raster elements are drawn straight onto a canvas
+// in pane order; the DOM text is rendered through an SVG <foreignObject>
+// snapshot with computed styles inlined.
+const snap = { busy: false };
+
+const SNAP_PROPS = [
+  "position", "left", "top", "right", "bottom", "width", "height", "transform",
+  "transform-origin", "display", "visibility", "opacity", "z-index", "font-family",
+  "font-size", "font-weight", "font-style", "font-variant", "letter-spacing",
+  "line-height", "text-align", "text-shadow", "color", "background-color",
+  "background-image", "border-top", "border-right", "border-bottom", "border-left",
+  "border-radius", "padding-top", "padding-right", "padding-bottom", "padding-left",
+  "margin-top", "margin-right", "margin-bottom", "margin-left", "box-shadow",
+  "white-space", "overflow", "box-sizing", "zoom", "text-transform", "filter",
+  "vertical-align", "text-decoration", "flex-direction", "align-items",
+  "justify-content", "gap", "max-width", "min-width",
+];
+const SNAP_SKIP_TAGS = new Set(["img", "canvas", "svg", "script", "style", "link", "video", "iframe"]);
+
+// Deep copy of an element with computed styles inlined, minus raster
+// elements (drawn separately) and anything `skip` rejects.
+function snapCloneDOM(node, skip) {
+  if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.nodeValue);
+  if (node.nodeType !== Node.ELEMENT_NODE) return null;
+  const tag = node.tagName.toLowerCase();
+  if (SNAP_SKIP_TAGS.has(tag) || skip(node)) return null;
+  const cs = getComputedStyle(node);
+  if (cs.display === "none" || cs.visibility === "hidden") return null;
+  const out = document.createElement(tag);
+  let style = "";
+  for (const prop of SNAP_PROPS) {
+    const v = cs.getPropertyValue(prop);
+    if (v && v !== "none" || prop === "display") style += `${prop}:${v};`;
+  }
+  out.setAttribute("style", style);
+  for (const c of node.childNodes) {
+    const cc = snapCloneDOM(c, skip);
+    if (cc) out.appendChild(cc);
+  }
+  return out;
+}
+
+// Rasterise the DOM labels of `root` into an Image of the given size.
+async function snapDOMImage(root, W, H, skip) {
+  const clone = snapCloneDOM(root, skip);
+  if (!clone) return null;
+  clone.style.position = "absolute";
+  clone.style.left = "0px";
+  clone.style.top = "0px";
+  clone.style.width = `${W}px`;
+  clone.style.height = `${H}px`;
+  clone.style.transform = "none";
+  clone.style.backgroundColor = "transparent";
+  clone.style.backgroundImage = "none";
+  const wrap = document.createElement("div");
+  wrap.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+  wrap.setAttribute("style", `position:relative;width:${W}px;height:${H}px;overflow:hidden;margin:0;padding:0;`);
+  wrap.appendChild(clone);
+  const xhtml = new XMLSerializer().serializeToString(wrap).replace(/&nbsp;/g, "&#160;");
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">` +
+    `<foreignObject width="100%" height="100%">${xhtml}</foreignObject></svg>`;
+  const img = new Image();
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  try {
+    await img.decode();
+    return img;
+  } catch {
+    return null; // labels are best-effort; the raster layers still export
+  }
+}
+
+function snapEffectiveOpacity(elm, stopAt) {
+  let a = 1;
+  for (let e = elm; e && e !== stopAt; e = e.parentElement) {
+    const o = parseFloat(getComputedStyle(e).opacity);
+    if (Number.isFinite(o)) a *= o;
+  }
+  return a;
+}
+
+async function snapSVGImage(svgEl, w, h) {
+  const clone = svgEl.cloneNode(true);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("width", w);
+  clone.setAttribute("height", h);
+  clone.style.transform = "none";
+  const img = new Image();
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(clone));
+  try { await img.decode(); return img; } catch { return null; }
+}
+
+// The flat map: everything inside #map except the Leaflet controls.
+async function snapshotMap() {
+  const container = el("map");
+  const rect = container.getBoundingClientRect();
+  const W = Math.round(rect.width), H = Math.round(rect.height);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = getComputedStyle(container).backgroundColor || "#0d0d0d";
+  ctx.fillRect(0, 0, W, H);
+
+  // raster + vector layers in pane z-order (DOM order within a pane)
+  const mapPane = container.querySelector(".leaflet-map-pane");
+  const panes = [...mapPane.querySelectorAll(".leaflet-pane")]
+    .map((p) => ({ p, z: parseInt(getComputedStyle(p).zIndex, 10) || 0 }))
+    .sort((a, b) => a.z - b.z);
+  for (const { p } of panes) {
+    for (const elm of p.querySelectorAll(":scope img, :scope canvas, :scope svg")) {
+      if (elm.closest(".leaflet-pane") !== p) continue; // belongs to a nested pane
+      const r = elm.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || r.right < rect.left || r.bottom < rect.top ||
+          r.left > rect.right || r.top > rect.bottom) continue;
+      const x = r.left - rect.left, y = r.top - rect.top;
+      const alpha = snapEffectiveOpacity(elm, mapPane);
+      if (alpha <= 0.01) continue;
+      ctx.globalAlpha = alpha;
+      try {
+        if (elm.tagName === "IMG") {
+          if (!elm.complete || !elm.naturalWidth) continue;
+          ctx.drawImage(elm, x, y, r.width, r.height);
+        } else if (elm.tagName === "CANVAS") {
+          ctx.drawImage(elm, x, y, r.width, r.height);
+        } else {
+          const img = await snapSVGImage(elm, r.width, r.height);
+          if (img) ctx.drawImage(img, x, y, r.width, r.height);
+        }
+      } catch (e) {
+        console.warn("PNG export: skipped a layer", e);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // DOM labels on top (place names, graticule labels, contour values,
+  // station badges, box handles) — not the zoom control / attribution,
+  // and not the interactive station cards (tooltips/popups with buttons)
+  const labels = await snapDOMImage(container, W, H, (n) =>
+    n.classList.contains("leaflet-control-container") ||
+    n.classList.contains("leaflet-tooltip-pane") ||
+    n.classList.contains("leaflet-popup-pane") ||
+    n.classList.contains("grat-labels")); // coordinates go on the frame's axes instead
+  if (labels) ctx.drawImage(labels, 0, 0, W, H);
+  return canvas;
+}
+
+// The globe: its two canvases plus the station cards on top.
+async function snapshotGlobe() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#0d0d0d";
+  ctx.fillRect(0, 0, W, H);
+  globeRender(false); // make sure the frame is full resolution
+  for (const id of ["globe-canvas", "globe-particles"]) {
+    const c = el(id);
+    const r = c.getBoundingClientRect();
+    ctx.drawImage(c, r.left, r.top, r.width, r.height);
+  }
+  const labels = await snapDOMImage(el("globe-view"), W, H, (n) =>
+    n.classList.contains("globe-hint") || n.classList.contains("globe-pin-card"));
+  if (labels) ctx.drawImage(labels, 0, 0, W, H);
+  return canvas;
+}
+
+// ---- figure frame: the shot inset in white with a title above and
+// latitude/longitude ticks in the margins (like a plotted figure).
+const SNAP_TICK_STEPS = [0.25, 0.5, 1, 2, 5, 10, 15, 20, 30, 45, 60, 90];
+
+// Coordinate labels for the frame, rounded so wrap-around arithmetic can't
+// leak floating-point noise like 23.379999999°W into the picture.
+function snapFmtLat(v, decimals = 2) {
+  const r = +v.toFixed(decimals);
+  return r === 0 ? "0°" : `${Math.abs(r)}°${r > 0 ? "N" : "S"}`;
+}
+function snapFmtLon(v, decimals = 2) {
+  const w = +(((v + 180) % 360 + 360) % 360 - 180).toFixed(decimals);
+  if (w === 0) return "0°";
+  if (Math.abs(w) === 180) return "180°";
+  return `${Math.abs(w)}°${w > 0 ? "E" : "W"}`;
+}
+
+// Tick positions (CSS px relative to the crop rect) for the flat map.
+// Latitude spacing follows Mercator, so each tick is projected.
+function snapAxisTicks(x0, y0, w, h) {
+  const nw = map.containerPointToLatLng([x0, y0]);
+  const se = map.containerPointToLatLng([x0 + w, y0 + h]);
+  const lonSpan = se.lng - nw.lng;
+  const latSpan = nw.lat - se.lat;
+  const pick = (span, maxTicks) => SNAP_TICK_STEPS.find((st) => span / st <= maxTicks) || 90;
+  const lonStep = pick(lonSpan, Math.max(3, Math.floor(w / 110)));
+  const latStep = pick(latSpan, Math.max(3, Math.floor(h / 70)));
+  const lon = [], lat = [];
+  for (let lng = Math.ceil(nw.lng / lonStep) * lonStep; lng <= se.lng + 1e-9; lng += lonStep) {
+    const x = map.latLngToContainerPoint([0, lng]).x - x0;
+    if (x >= -0.5 && x <= w + 0.5) lon.push({ pos: x, label: snapFmtLon(lng, 4) });
+  }
+  for (let la = Math.ceil(se.lat / latStep) * latStep; la <= nw.lat + 1e-9; la += latStep) {
+    if (la > MERC_LAT || la < -MERC_LAT) continue;
+    const y = map.latLngToContainerPoint([la, nw.lng]).y - y0;
+    if (y >= -0.5 && y <= h + 0.5) lat.push({ pos: y, label: snapFmtLat(la, 4) });
+  }
+  return { lon, lat };
+}
+
+function snapTitle() {
+  const d = currentDisplay;
+  if (!d) return "";
+  if (d.isDiff) return `${d.label} · A: ${selLabel(currentField)} · B: ${selLabel(currentFieldB)}`;
+  return `${statPrefix(d)}${d.label} · ${EXP_SHORT[state.experiment] || state.experiment} · ${selLabel(d)}`;
+}
+
+// shot: canvas at device resolution covering imgW×imgH CSS px.
+function snapFrame(shot, imgW, imgH, opts = {}) {
+  const dpr = shot.width / imgW;
+  const axes = opts.axes;
+  const mL = axes ? 66 : 24, mB = axes ? 46 : 24, mT = opts.title ? 44 : 24, mR = 24;
+  const W = imgW + mL + mR, H = imgH + mT + mB;
+  const out = document.createElement("canvas");
+  out.width = Math.round(W * dpr);
+  out.height = Math.round(H * dpr);
+  const ctx = out.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(shot, mL, mT, imgW, imgH);
+  ctx.strokeStyle = "#2a2a2a";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mL + 0.5, mT + 0.5, imgW - 1, imgH - 1);
+
+  ctx.fillStyle = "#1a1a1a";
+  ctx.textBaseline = "alphabetic";
+  if (opts.title) {
+    ctx.font = "600 15px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.textAlign = "left";
+    let title = opts.title;
+    while (ctx.measureText(title).width > W - mL - mR && title.length > 8) title = title.slice(0, -2).trimEnd() + "…";
+    ctx.fillText(title, mL, mT - 16);
+  }
+  if (axes) {
+    ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.strokeStyle = "#2a2a2a";
+    const tick = 6;
+    // longitudes along the bottom (ticks mirrored on top)
+    ctx.textAlign = "center";
+    for (const t of axes.lon) {
+      const x = Math.round(mL + t.pos) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, mT + imgH); ctx.lineTo(x, mT + imgH + tick);
+      ctx.moveTo(x, mT); ctx.lineTo(x, mT - tick);
+      ctx.stroke();
+      ctx.fillText(t.label, x, mT + imgH + tick + 15);
+    }
+    // latitudes down the left (ticks mirrored on the right)
+    ctx.textAlign = "right";
+    for (const t of axes.lat) {
+      const y = Math.round(mT + t.pos) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(mL, y); ctx.lineTo(mL - tick, y);
+      ctx.moveTo(mL + imgW, y); ctx.lineTo(mL + imgW + tick, y);
+      ctx.stroke();
+      ctx.fillText(t.label, mL - tick - 5, y + 4);
+    }
+  }
+  return out;
+}
+
+function snapStem() {
+  const d = currentDisplay;
+  const time = el("month-input").value || "";
+  if (!d) return `spear_view_${time}`;
+  const statTok = { raw: state.member, mean: "ensmean", spread: "ensspread", anom: `anom${state.member}` }[state.stat] || state.stat;
+  return `spear_${d.isDiff ? "diff_" : ""}${d.var}_${state.experiment}_${statTok}_${time}`;
+}
+
+function snapSave(canvas, filename) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => {
+      if (!blob) { setStatus("PNG export failed (canvas could not be encoded)", true); resolve(false); return; }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      resolve(true);
+    }, "image/png");
+  });
+}
+
+async function downloadViewPNG() {
+  if (snap.busy || !currentDisplay) return;
+  snap.busy = true;
+  el("dl-png").disabled = true;
+  setStatus("Rendering PNG of the current view…");
+  try {
+    const shot = globe.open ? await snapshotGlobe() : await snapshotMap();
+    const size = globe.open ? { w: window.innerWidth, h: window.innerHeight } : map.getSize();
+    const axes = globe.open ? null : snapAxisTicks(0, 0, size.x, size.y);
+    const canvas = snapFrame(shot, globe.open ? size.w : size.x, globe.open ? size.h : size.y, {
+      title: snapTitle(), axes,
+    });
+    const ok = await snapSave(canvas, `${snapStem()}_${globe.open ? "globe" : "map"}.png`);
+    if (ok) setStatus(`PNG saved (${canvas.width}×${canvas.height})`);
+  } catch (e) {
+    setStatus(`PNG export failed: ${e.message || e}`, true);
+  } finally {
+    snap.busy = false;
+    el("dl-png").disabled = false;
+  }
+}
+
+// Wait until the tile layers have finished loading for the current view
+// (plus a beat for Leaflet's tile fade-in).
+function snapWaitForTiles(maxMs = 5000) {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    const check = () => {
+      const loading = [basemapLayer, esriLabelLayer].some((l) => l.isLoading());
+      if (!loading || performance.now() - t0 > maxMs) setTimeout(resolve, 350);
+      else setTimeout(check, 100);
+    };
+    setTimeout(check, 80);
+  });
+}
+
+// PNG of just the box: fit the map to the box (so all of it is on screen
+// at the best zoom), snapshot, crop to the box's pixel rectangle, then
+// restore the previous view. The outline and handles are hidden for the
+// shot so only the contents remain.
+async function boxDownloadPNG() {
+  if (!box.bounds || !box.rect || snap.busy) return;
+  snap.busy = true;
+  boxUpdateSize();
+  setStatus("Rendering PNG of the box contents…");
+  const wasGlobe = globe.open;
+  const prevCenter = map.getCenter(), prevZoom = map.getZoom();
+  const handles = BOX_CORNERS.map((c) => box.handles[c] && box.handles[c].getElement()).filter(Boolean);
+  try {
+    if (wasGlobe) await toggleGlobe({ sync: false });
+    const lb = box.rect.getBounds();
+    map.fitBounds(lb, { animate: false, padding: [8, 8] });
+    box.rect.setStyle({ opacity: 0, fillOpacity: 0 });
+    handles.forEach((h) => { h.style.visibility = "hidden"; });
+    await snapWaitForTiles();
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
+    const full = await snapshotMap();
+    const dpr = full.width / el("map").getBoundingClientRect().width;
+    const nw = map.latLngToContainerPoint(lb.getNorthWest());
+    const se = map.latLngToContainerPoint(lb.getSouthEast());
+    const size = map.getSize();
+    const x0 = Math.max(0, Math.min(nw.x, se.x)), y0 = Math.max(0, Math.min(nw.y, se.y));
+    const x1 = Math.min(size.x, Math.max(nw.x, se.x)), y1 = Math.min(size.y, Math.max(nw.y, se.y));
+    const w = Math.max(1, Math.round(x1 - x0)), h = Math.max(1, Math.round(y1 - y0));
+    const crop = document.createElement("canvas");
+    crop.width = Math.round(w * dpr);
+    crop.height = Math.round(h * dpr);
+    crop.getContext("2d").drawImage(full, x0 * dpr, y0 * dpr, w * dpr, h * dpr, 0, 0, crop.width, crop.height);
+    const b = box.bounds;
+    const out = snapFrame(crop, w, h, {
+      title: `${snapTitle()} · box ${snapFmtLat(b.south)} to ${snapFmtLat(b.north)}, ` +
+             `${snapFmtLon(b.west)} to ${snapFmtLon(b.east)}`,
+      axes: snapAxisTicks(x0, y0, w, h),
+    });
+    const f = (v) => v.toFixed(2).replace("-", "m");
+    const ok = await snapSave(out, `${snapStem()}_box_${f(b.south)}_${f(b.north)}_${f(normLon(b.west))}_${f(normLon(b.east))}.png`);
+    if (ok) setStatus(`Box PNG saved (${out.width}×${out.height})`);
+  } catch (e) {
+    setStatus(`Box PNG failed: ${e.message || e}`, true);
+  } finally {
+    box.rect.setStyle({ opacity: 1, fillOpacity: BOX_STYLE.fillOpacity });
+    handles.forEach((h) => { h.style.visibility = ""; });
+    map.setView(prevCenter, prevZoom, { animate: false });
+    if (wasGlobe) await toggleGlobe({ sync: false });
+    snap.busy = false;
+    boxUpdateSize();
+  }
+}

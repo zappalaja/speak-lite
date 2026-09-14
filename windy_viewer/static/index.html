@@ -94,6 +94,7 @@
     <div class="ts-card-actions box-actions">
       <button type="button" id="box-dl-nc" title="NetCDF with full metadata">&#8595; NetCDF</button>
       <button type="button" id="box-dl-csv" title="CSV (time, lat, lon, value) with metadata header">&#8595; CSV</button>
+      <button type="button" id="box-dl-png" title="PNG image of just the box contents (map view, current month)">&#8595; PNG</button>
     </div>
   </div>
 </div>
@@ -221,11 +222,41 @@
     <input type="checkbox" id="particles-toggle" checked />
   </label>
 
+  <label class="row">
+    <span>Contours <span class="info-i" id="contour-info">&#9432;</span></span>
+    <input type="checkbox" id="contour-toggle" />
+  </label>
+  <div class="contour-opts" id="contour-opts" hidden>
+    <div class="seg" id="contour-mode-seg"></div>
+    <div class="filter-row" id="contour-interval-row">
+      <label>Every <input type="number" id="contour-interval" step="any" min="0" placeholder="auto" /> <span class="contour-unit"></span></label>
+    </div>
+    <div class="filter-row" id="contour-custom-row">
+      <label class="grow">Levels <input type="text" id="contour-custom" class="grow" placeholder="e.g. 0, 5, 10, 20" /> <span class="contour-unit"></span></label>
+    </div>
+    <div class="filter-row">
+      <span>Color</span>
+      <div class="seg contour-color-seg" id="contour-color-seg"></div>
+      <input type="color" id="contour-color" value="#ffe066" title="Line color" />
+    </div>
+    <div class="filter-row">
+      <label>Width <input type="number" id="contour-width" step="0.5" min="0.5" max="6" /></label>
+      <label class="grow">Opacity <input type="range" id="contour-opacity" min="10" max="100" /></label>
+    </div>
+    <div class="filter-row">
+      <label><input type="checkbox" id="contour-labels" /> Value labels</label>
+      <label><input type="checkbox" id="contour-casing" /> Dark outline</label>
+    </div>
+    <label class="filter-row"><input type="checkbox" id="contour-banded" /> Banded fill (flat colour between levels)</label>
+    <div class="contour-summary" id="contour-summary"></div>
+  </div>
+
   <div class="row">
     <span>Download</span>
     <div class="dl-buttons">
       <button type="button" id="dl-nc" title="NetCDF with full metadata">&#8595; NetCDF</button>
       <button type="button" id="dl-csv" title="CSV with metadata header">&#8595; CSV</button>
+      <button type="button" id="dl-png" title="PNG image of the current map or globe view — no panels; includes whatever labels, lat/lon lines, contours and stations are shown">&#8595; PNG</button>
     </div>
   </div>
 

@@ -807,6 +807,51 @@ html, body {
   border-color: #e66767;
 }
 
+/* ---------- contours ---------- */
+.contour-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: -2px 0 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.contour-opts[hidden] { display: none; }
+.contour-opts .filter-row { margin-top: 0; }
+.contour-opts .filter-row[hidden] { display: none; }
+.contour-color-seg button { white-space: nowrap; flex: 1 1 0; padding: 5px 6px; }
+.contour-opts .filter-row .grow { flex: 1; min-width: 0; }
+.contour-opts .filter-row input[type="text"] { width: auto; }
+.contour-opts .filter-row input[type="range"] { flex: 1; min-width: 60px; }
+.contour-opts .filter-row input[type="checkbox"] { width: 15px; height: 15px; margin: 0; }
+.contour-opts input[type="color"] {
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #242423;
+  cursor: pointer;
+}
+.contour-color-seg { width: auto; flex: 1; }
+.contour-unit { color: var(--muted); font-size: 12px; }
+.contour-summary { color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.contour-summary:empty { display: none; }
+.contour-label { pointer-events: none; }
+.contour-label span {
+  display: inline-block;
+  transform: translate(-50%, -50%);
+  padding: 1px 5px;
+  font: 700 12px system-ui, sans-serif;
+  color: #fff;
+  white-space: nowrap;
+  background: rgba(12, 12, 14, 0.72);
+  border-radius: 8px;
+  text-shadow: 0 0 2px #000;
+}
+
 /* ---------- draw-a-box subset ---------- */
 /* compound selectors: .globe-btn (defined later) must not override these */
 .globe-btn.box-btn { top: 64px; } /* directly under the Globe/Map button */
