@@ -1,4 +1,5 @@
 # SPEAK-Lite Visualization
+## UNDER DEVELOPMENT/PROTOTYPE**
 
 An interactive viewer for the **SPEAR-MED large
 ensemble**, streaming data on demand from the public ArrayLake/Icechunk store
