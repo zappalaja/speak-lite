@@ -329,7 +329,7 @@ def _stat_token(stat: str, member: str) -> str:
 
 def _select_stat(ds: xr.Dataset, var: str, member: str, time: str, stat: str) -> xr.DataArray:
     """One month of: a single member, the ensemble mean, the ensemble
-    spread (sample std, ddof=1), or a member's anomaly from the mean."""
+    spread (sample std, ddof=1), or a member's deviation from the mean."""
     da = ds[var].sel(time=slice(time, time))
     if da.sizes.get("time", 0) == 0:
         raise HTTPException(404, f"no timestep for {time}")
@@ -452,7 +452,7 @@ def field(
     da = _select_stat(ds, var, member, time, stat)
     grid = _grid_meta(ds)
     shift = grid.pop("_shift")
-    # spread/anomaly are difference-like: the unit offset cancels (a 2 K
+    # spread/deviation are difference-like: the unit offset cancels (a 2 K
     # spread is 2 °C of spread, not -271 °C).
     offset = 0.0 if stat in ("spread", "anom") else cfg["offset"]
 
@@ -587,7 +587,7 @@ def _stat_text(stat: str, member: str) -> str:
         "raw": f"member {member}",
         "mean": "ensemble mean of all 30 members",
         "spread": "ensemble spread (standard deviation, ddof=1, across 30 members)",
-        "anom": f"anomaly: member {member} minus the 30-member ensemble mean",
+        "anom": f"deviation: member {member} minus the 30-member ensemble mean",
     }[stat]
 
 

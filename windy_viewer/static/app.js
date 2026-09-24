@@ -212,7 +212,7 @@ function convDiff(v, spec) {
   return v * spec.scale;
 }
 
-// Spread and anomaly are difference-like quantities: like compare-mode
+// Spread and deviation are difference-like quantities: like compare-mode
 // diffs, their unit conversion is scale-only.
 function isDeltaLike(d) {
   return !!d && (d.isDiff || d.stat === "spread" || d.stat === "anom");
@@ -366,7 +366,7 @@ function buildDynamicLUT(f, cfg) {
   );
 }
 
-// LUT choice per statistic: spread is always dynamic-sequential, anomaly
+// LUT choice per statistic: spread is always dynamic-sequential, deviation
 // always dynamic-diverging (centered on zero); otherwise the variable's own.
 function lutForField(f) {
   const cfg = VAR_CONFIG[f.var];
@@ -376,7 +376,7 @@ function lutForField(f) {
 }
 
 function statPrefix(f) {
-  return f.stat === "spread" ? "Spread of " : f.stat === "anom" ? "Anomaly of " : "";
+  return f.stat === "spread" ? "Spread of " : f.stat === "anom" ? "Deviation of " : "";
 }
 
 // Symmetric display limit for a difference field: 98th percentile of |Δ|,
@@ -1548,7 +1548,7 @@ const HEAVY_NOTES = {
 
 // Name the statistic being computed in the overlay title.
 function heavyStatLabel() {
-  const names = { mean: "ensemble mean", spread: "ensemble spread", anom: "ensemble anomaly" };
+  const names = { mean: "ensemble mean", spread: "ensemble spread", anom: "ensemble deviation" };
   const active = new Set();
   if (state.stat !== "raw") active.add(state.stat);
   if (state.compare && state.b.stat !== "raw") active.add(state.b.stat);
@@ -1883,7 +1883,7 @@ function rebuildUnitSeg() {
 }
 
 function memberBtnState(btn, stat, member) {
-  // Member is meaningful for Member & Anomaly; greyed for Mean & Spread.
+  // Member is meaningful for Member & Deviation; greyed for Mean & Spread.
   btn.disabled = stat === "mean" || stat === "spread";
   btn.textContent =
     stat === "mean" ? "ensemble mean (30)" :
@@ -2098,12 +2098,12 @@ async function init() {
     boxSetBounds(SAVED.box);
   }
 
-  const STAT_OPTS = [["raw", "Member"], ["mean", "Mean"], ["spread", "Spread"], ["anom", "Anomaly"]];
+  const STAT_OPTS = [["raw", "Member"], ["mean", "Mean"], ["spread", "Spread"], ["anom", "Deviation"]];
   const STAT_INFO = {
     raw: "Single ensemble member — one physically consistent realization of the climate (choose which member below).",
     mean: "Ensemble mean — the average of all 30 members; averages out internal variability to isolate the forced signal.",
     spread: "Ensemble spread — the standard deviation across the 30 members (sample std, N−1); maps where internal variability is largest.",
-    anom: "Ensemble anomaly — the selected member minus the 30-member ensemble mean; shows that member's internal-variability excursion from the forced signal.",
+    anom: "Ensemble deviation — the selected member minus the 30-member ensemble mean; shows how far that member departs from the forced signal due to internal variability.",
   };
   buildSeg("stat-seg", STAT_OPTS, state.stat, (v) => {
     state.stat = v;
@@ -4288,7 +4288,7 @@ function boxStatText() {
     raw: `member ${state.member}`,
     mean: "ensemble mean",
     spread: "ensemble spread",
-    anom: `anomaly of ${state.member}`,
+    anom: `deviation of ${state.member}`,
   }[state.stat];
 }
 

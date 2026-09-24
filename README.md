@@ -6,7 +6,7 @@ ensemble**, streaming data on demand from the public ArrayLake/Icechunk store
 (`GFDL/noaa-gfdl-spear-large-ensembles-pds`).
 
 **Features**: 16 monthly variables (atmosphere incl. pressure levels, ocean
-SST) · ensemble member / mean / spread / anomaly statistics · A−B compare
+SST) · ensemble member / mean / spread / deviation statistics · A−B compare
 mode · wind particle animation · rotatable 3-D globe view · virtual stations
 with time-series extraction and merged plots · year playback · value
 filtering · unit conversion · NetCDF/CSV downloads with full source
