@@ -1,0 +1,22 @@
+{
+  "_comment": "Copy to datasets.json (or point VIEWER_DATASETS at it). Order = order in the UI; the first entry is the default. A bare SPEAR entry inherits the built-in curated variable table.",
+  "datasets": [
+    {
+      "id": "spear",
+      "type": "arraylake",
+      "repo": "GFDL/noaa-gfdl-spear-large-ensembles-pds",
+      "branch": "main"
+    },
+    {
+      "id": "ecda",
+      "type": "catalog",
+      "path": "catalogs/ecda_nc3",
+      "title": "ECDA reanalysis",
+      "subtitle": "SPEAR c96 ECDA J11 · monthly",
+      "description": "GFDL SPEAR ensemble coupled data assimilation, monthly means on a 1 x 1.25 deg grid",
+      "variables": {
+        "t_surf": { "label": "Surface temperature" }
+      }
+    }
+  ]
+}

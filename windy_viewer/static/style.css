@@ -103,6 +103,7 @@ html, body {
   margin-left: 4px;
 }
 
+.row[hidden] { display: none; }
 .row {
   display: flex;
   align-items: center;
@@ -603,7 +604,8 @@ html, body {
   font-size: 12px;
   color: var(--muted);
 }
-.ts-range input[type="month"] {
+.ts-range input[type="month"],
+.ts-range input[type="text"] {
   background: #242423;
   color: var(--ink);
   border: 1px solid var(--border);

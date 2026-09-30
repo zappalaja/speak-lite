@@ -1,6 +1,10 @@
-/* SPEAR-MED windy-style viewer frontend.
+/* Windy-style viewer frontend for gridded monthly climate data.
  *
- * Fetches (var, experiment, member|ensmean, month) fields from /api/field
+ * Everything dataset-specific (title, variables, experiments, ensemble
+ * members, levels, wind pairs, units) comes from /api/meta; `meta` holds
+ * the active dataset and switching datasets reloads the page.
+ *
+ * Fetches (dataset, var, experiment, member|ensmean, month) fields from /api/field
  * and renders them as colormapped rasters reprojected to Web Mercator.
  * Compare mode fetches two selections (A, B) and renders A − B with a
  * diverging colormap auto-scaled to the difference field. A canvas
@@ -197,8 +201,47 @@ const UNITS = {
   ],
 };
 
+// Variables the built-in tables don't know (any non-SPEAR dataset) fall
+// back to their unit family from /api/meta, and finally to the native
+// units with a dynamic colour scale.
+const FAMILY_UNITS = {
+  temp: TEMP_UNITS, precip: UNITS.pr, pressure: UNITS.psl, wind: WIND_UNITS,
+  radiation: RAD_UNITS, length: UNITS.zg, ratio: UNITS.hus,
+};
+const FAMILY_CONFIG = {
+  temp: VAR_CONFIG.tas, precip: VAR_CONFIG.pr, pressure: VAR_CONFIG.psl,
+  radiation: VAR_CONFIG.rlut, length: VAR_CONFIG.zg, ratio: VAR_CONFIG.hus,
+};
+const GENERIC_UNIT_CACHE = {};
+
+function varFamily(varName) {
+  const v = meta && meta.variables[varName];
+  return v ? v.family : "other";
+}
+
+function unitOptionsFor(varName) {
+  if (UNITS[varName]) return UNITS[varName];
+  const fam = varFamily(varName);
+  if (FAMILY_UNITS[fam]) return FAMILY_UNITS[fam];
+  if (!GENERIC_UNIT_CACHE[varName]) {
+    const u = (meta && meta.variables[varName] && meta.variables[varName].units) || "";
+    GENERIC_UNIT_CACHE[varName] = [{ id: "native", label: u || "native", scale: 1, offset: 0, unit: u, decimals: 2 }];
+  }
+  return GENERIC_UNIT_CACHE[varName];
+}
+
+function varConfigFor(varName) {
+  if (VAR_CONFIG[varName]) return VAR_CONFIG[varName];
+  const fam = varFamily(varName);
+  if (fam === "wind") {
+    return /speed|sfcwind|wspd|mag/i.test(varName)
+      ? VAR_CONFIG.sfcWind : { decimals: 1, dynamic: "div" };
+  }
+  return FAMILY_CONFIG[fam] || { decimals: 2, dynamic: "seq", ramp: "thermal" };
+}
+
 function unitSpecFor(varName) {
-  const opts = UNITS[varName];
+  const opts = unitOptionsFor(varName);
   return opts.find((u) => u.id === state.units[varName]) || opts[0];
 }
 
@@ -274,7 +317,7 @@ function colormap(stops, v, out) {
 const lutCache = {};
 function buildLUT(varName) {
   if (lutCache[varName]) return lutCache[varName];
-  const stops = VAR_CONFIG[varName].stops;
+  const stops = varConfigFor(varName).stops;
   const N = 1024;
   const min = stops[0].v;
   const max = stops[stops.length - 1].v;
@@ -369,7 +412,7 @@ function buildDynamicLUT(f, cfg) {
 // LUT choice per statistic: spread is always dynamic-sequential, deviation
 // always dynamic-diverging (centered on zero); otherwise the variable's own.
 function lutForField(f) {
-  const cfg = VAR_CONFIG[f.var];
+  const cfg = varConfigFor(f.var);
   if (f.stat === "anom") return buildDynamicLUT(f, { dynamic: "div" });
   if (f.stat === "spread") return buildDynamicLUT(f, { dynamic: "seq", ramp: "plasma" });
   return cfg.dynamic ? buildDynamicLUT(f, cfg) : buildLUT(f.var);
@@ -461,7 +504,7 @@ const basemapLayer = L.tileLayer(
   {
     attribution:
       '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
-      '&copy; <a href="https://carto.com/attributions">CARTO</a> · SPEAR-MED (NOAA GFDL)',
+      '&copy; <a href="https://carto.com/attributions">CARTO</a> · <span id="attr-dataset">data</span>',
     subdomains: "abcd",
     maxZoom: 20,
     crossOrigin: true,
@@ -600,6 +643,7 @@ let loadSeq = 0;            // guards against out-of-order responses
 // Selection state lives here, not in native <select> elements — their OS
 // popups don't register clicks reliably in some WSL/remote environments.
 const state = {
+  dataset: null,       // active dataset id (from /api/meta)
   var: "pr",
   experiment: "scenarioSSP5-85",
   member: "r1i1p1f1",
@@ -635,9 +679,13 @@ const gratState = {
   lon: !(SAVED && SAVED.grat && SAVED.grat.lon === false),
 };
 
+let datasetSwitching = false; // set while reloading into another dataset
+
 function saveState() {
+  if (datasetSwitching) return; // don't overwrite the switch with the old selection
   try {
     localStorage.setItem("spearViewer", JSON.stringify({
+      dataset: state.dataset,
       var: state.var,
       experiment: state.experiment,
       member: state.member,
@@ -1271,7 +1319,8 @@ function selLabel(f) {
     stat === "spread" ? "ens spread" :
     stat === "anom" ? `${f.member} − mean` :
     f.member === "ensmean" ? "ens mean" : f.member;
-  return `${m} · ${f.time}` + (f.plev ? ` · ${f.plev} hPa` : "");
+  // datasets without an ensemble have no member: omit the empty segment
+  return [m, f.time].filter(Boolean).join(" · ") + (f.plev ? ` · ${f.plev} hPa` : "");
 }
 
 // idx: station index (0-based) for pin cards, -1 for the ad-hoc popup.
@@ -1526,7 +1575,7 @@ async function fetchJSON(url) {
 }
 
 function fetchField(sel) {
-  const p = { var: state.var, ...sel };
+  const p = { dataset: state.dataset, var: state.var, ...sel };
   if (meta.variables[state.var].plev) p.plev = state.plev;
   return fetchJSON(`/api/field?${new URLSearchParams(p)}`);
 }
@@ -1542,8 +1591,12 @@ const heavyOverlay = { timer: null, delay: null, t0: 0, seq: 0, kind: "sfc" };
 // clocks (each adapts to observed durations on this connection).
 const HEAVY_DEFAULT_SECS = { plev: 120, sfc: 12 };
 const HEAVY_NOTES = {
-  plev: "Reading all 30 members on pressure levels (~230&nbsp;MB from the cloud store).<br>First load takes a while — this selection and its sibling levels will be instant afterwards.",
-  sfc: "Reading all 30 members (~25&nbsp;MB from the cloud store).<br>First load only — this selection will be instant afterwards.",
+  get plev() {
+    return `Reading all ${meta.n_members} members on pressure levels (hundreds of MB from the store).<br>First load takes a while — this selection and its sibling levels will be instant afterwards.`;
+  },
+  get sfc() {
+    return `Reading all ${meta.n_members} members (tens of MB from the store).<br>First load only — this selection will be instant afterwards.`;
+  },
 };
 
 // Name the statistic being computed in the overlay title.
@@ -1688,6 +1741,7 @@ async function loadField() {
       // pressure-level variables, uas/vas near-surface otherwise. For
       // ensemble statistics the particles show the ensemble-mean wind.
       const windParams = {
+        dataset: state.dataset,
         experiment: state.experiment,
         member: state.stat === "raw" ? state.member : "ensmean",
         time: el("month-input").value,
@@ -1695,12 +1749,14 @@ async function loadField() {
       if (meta.variables[state.var].plev) windParams.plev = state.plev;
       const [f, w] = await Promise.all([
         fetchField(selA),
-        fetchJSON(`/api/wind?${new URLSearchParams(windParams)}`),
+        hasWind() ? fetchJSON(`/api/wind?${new URLSearchParams(windParams)}`) : Promise.resolve(null),
       ]);
       if (seq !== loadSeq) return;
       f._grid = toFloat32(f.values, f.nlat, f.nlon);
-      w._u = toFloat32(w.u, w.nlat, w.nlon);
-      w._v = toFloat32(w.v, w.nlat, w.nlon);
+      if (w) {
+        w._u = toFloat32(w.u, w.nlat, w.nlon);
+        w._v = toFloat32(w.v, w.nlat, w.nlon);
+      }
       currentField = f;
       currentFieldB = null;
       currentWind = w;
@@ -1746,7 +1802,7 @@ function renderMeta() {
     );
   } else {
     const f = currentField;
-    const cfg = VAR_CONFIG[f.var];
+    const cfg = varConfigFor(f.var);
     let min, max, tickVals, colorFn;
     if (f._dyn) {
       // auto-scaled range computed from the loaded field
@@ -1876,7 +1932,7 @@ document.addEventListener("click", () =>
 function rebuildUnitSeg() {
   buildSeg(
     "unit-seg",
-    UNITS[state.var].map((u) => [u.id, u.label]),
+    unitOptionsFor(state.var).map((u) => [u.id, u.label]),
     state.units[state.var],
     (id) => { state.units[state.var] = id; renderMeta(); }
   );
@@ -1885,9 +1941,10 @@ function rebuildUnitSeg() {
 function memberBtnState(btn, stat, member) {
   // Member is meaningful for Member & Deviation; greyed for Mean & Spread.
   btn.disabled = stat === "mean" || stat === "spread";
+  const n = meta ? meta.n_members : "";
   btn.textContent =
-    stat === "mean" ? "ensemble mean (30)" :
-    stat === "spread" ? "ensemble spread (30)" : member;
+    stat === "mean" ? `ensemble mean (${n})` :
+    stat === "spread" ? `ensemble spread (${n})` : member;
 }
 
 // When the panel overflows (e.g. compare mode), widen it by the MEASURED
@@ -1918,7 +1975,60 @@ function updateControlStates() {
   el("plev-btn").disabled = !(meta && meta.variables[state.var] && meta.variables[state.var].plev);
 }
 
-const EXP_SHORT = { historical: "Historical", "scenarioSSP5-85": "SSP5-8.5" };
+let META_ALL = null; // the full /api/meta response (all datasets); `meta` is the active one
+
+function expShort(k) {
+  const e = meta && meta.experiments[k];
+  return (e && e.short) || k;
+}
+
+function hasWind() {
+  if (!meta || !meta.wind) return false;
+  const v = meta.variables[state.var];
+  return !!(v && v.plev ? meta.wind.plev : meta.wind.sfc);
+}
+
+// Human label for a variable group (Zarr group / FMS realm) as reported by the source.
+function groupLabel(g) {
+  const known = {
+    Amon: "Atmospheric (Monthly)", Omon: "Ocean (Monthly)", Lmon: "Land (Monthly)", SImon: "Sea ice (Monthly)",
+    atmos: "Atmosphere", ocean: "Ocean", land: "Land", ice: "Sea ice",
+  };
+  return known[g] || g || "Variables";
+}
+
+function applyBranding() {
+  const link = el("brand-link");
+  link.textContent = meta.title;
+  link.href = meta.home || meta.link || "#";
+  link.title = meta.home ? `Open the ${meta.title} homepage` : meta.title;
+  el("brand-sub").textContent = meta.subtitle || "";
+  document.title = `${meta.title} Viewer`;
+  const attr = el("attr-dataset");
+  if (attr) attr.textContent = meta.title;
+  const da = el("data-access");
+  if (meta.link) { da.href = meta.link; da.hidden = false; } else { da.hidden = true; }
+}
+
+// Dataset switch: persist the choice and reload — init() then builds
+// every control from that dataset's metadata.
+function buildDatasetSeg() {
+  const ok = META_ALL.datasets.filter((d) => !d.error);
+  el("dataset-row").hidden = ok.length < 2;
+  if (ok.length < 2) return;
+  buildSeg("dataset-seg", ok.map((d) => [d.id, d.title]), meta.id, (id) => {
+    if (id === meta.id) return;
+    datasetSwitching = true;
+    try {
+      // keep only view preferences; the selection is rebuilt from the new dataset
+      const saved = JSON.parse(localStorage.getItem("spearViewer") || "{}");
+      const keep = { dataset: id, opacity: saved.opacity, particles: saved.particles,
+                     grat: saved.grat, contours: saved.contours, globe: saved.globe, units: saved.units };
+      localStorage.setItem("spearViewer", JSON.stringify(keep));
+    } catch { /* best effort */ }
+    location.reload();
+  }, Object.fromEntries(ok.map((d) => [d.id, d.description || d.subtitle || d.title])));
+}
 
 // ---- floating info popover for the (i) marks
 let infoPopover = null;
@@ -1950,14 +2060,45 @@ document.addEventListener("click", hideInfoPopover);
 // Variable buttons live in three groups (surface/TOA, pressure levels,
 // ocean); selecting in one group clears the active state in all.
 function buildVarButtons() {
-  const containers = {
-    sfc: el("var-seg-sfc"),
-    plev: el("var-seg-plev"),
-    ocean: el("var-seg-ocean"),
+  // One block per group (Zarr group / FMS realm) in order of appearance;
+  // level-bearing variables of a group go under its "Pressure levels"
+  // sub-block, which also hosts the level dropdown.
+  const root = el("var-groups");
+  const holder = el("plev-holder");
+  root.parentNode.insertBefore(holder, root.nextSibling); // reclaim before wiping
+  holder.hidden = true;
+  root.innerHTML = "";
+  el("var-seg-plev").innerHTML = "";
+  const blocks = {};
+  const segFor = (v) => {
+    if (v.plev) return el("var-seg-plev");
+    const g = v.group || "";
+    if (!blocks[g]) {
+      const row = document.createElement("div");
+      row.className = "row row-col";
+      const hint = document.createElement("span");
+      hint.className = "group-hint";
+      hint.textContent = groupLabel(g);
+      hint.title = meta.grid || "";
+      const seg = document.createElement("div");
+      seg.className = "seg";
+      row.appendChild(hint);
+      row.appendChild(seg);
+      root.appendChild(row);
+      blocks[g] = { row, seg };
+    }
+    return blocks[g].seg;
   };
-  Object.values(containers).forEach((c) => (c.innerHTML = ""));
+  const plevGroup = Object.values(meta.variables).find((v) => v.plev);
+  if (plevGroup) {
+    // make sure the block exists, then attach the level sub-block to it
+    const g = plevGroup.group || "";
+    segFor({ group: g, plev: false });
+    blocks[g].row.appendChild(holder);
+    holder.hidden = false;
+  }
   for (const [k, v] of Object.entries(meta.variables)) {
-    const target = v.group === "Omon" ? containers.ocean : v.plev ? containers.plev : containers.sfc;
+    const target = segFor(v);
     const btn = document.createElement("button");
     btn.type = "button";
     btn.dataset.value = k;
@@ -1976,11 +2117,14 @@ function buildVarButtons() {
     btn.addEventListener("click", () => {
       if (state.var === k) return;
       document
-        .querySelectorAll("#var-seg-sfc button, #var-seg-plev button, #var-seg-ocean button")
+        .querySelectorAll("#var-groups button")
         .forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       state.var = k;
       state.filter = { lo: null, hi: null }; // filter bounds are per-variable
+      // variables of one dataset can cover different periods
+      const mi = el("month-input");
+      if (v.start && v.end && (mi.value < v.start || mi.value > v.end)) mi.value = v.start;
       rebuildUnitSeg();
       updateControlStates();
       loadField();
@@ -2020,11 +2164,33 @@ function buildPlevDropdown() {
 }
 
 async function init() {
-  meta = await fetchJSON("/api/meta");
+  META_ALL = await fetchJSON("/api/meta");
+  const wanted = (SAVED && SAVED.dataset) || META_ALL.default;
+  const dsMeta =
+    META_ALL.datasets.find((d) => d.id === wanted && !d.error) ||
+    META_ALL.datasets.find((d) => d.id === META_ALL.default);
+  meta = { ...dsMeta, ts_limits: META_ALL.ts_limits, box_limits: META_ALL.box_limits };
+  state.dataset = meta.id;
+  applyBranding();
+  buildDatasetSeg();
+
+  // dataset defaults (before the saved selection is restored on top)
+  state.var = meta.variables.pr ? "pr" : Object.keys(meta.variables)[0];
+  state.experiment = meta.experiments["scenarioSSP5-85"] ? "scenarioSSP5-85" : Object.keys(meta.experiments)[0];
+  state.b.experiment = state.experiment;
+  state.member = meta.members[0] || "";
+  state.b.member = meta.members[1] || meta.members[0] || "";
+  state.plev = meta.levels.includes(500) ? 500 : (meta.levels[0] || 500);
+  // rows that make no sense for this dataset
+  el("exp-row").hidden = el("exp-row-b").hidden = Object.keys(meta.experiments).length < 2;
+  el("member-row").hidden = el("member-row-b").hidden = !meta.ensemble;
+  el("stat-row").hidden = el("stat-row-b").hidden = !meta.ensemble;
+  el("wind-row").hidden = !(meta.wind && (meta.wind.sfc || meta.wind.plev));
 
   // Restore the previous session's selections (validated against meta).
   const STAT_IDS = ["raw", "mean", "spread", "anom"];
-  if (SAVED) {
+  const sameDataset = SAVED && ((SAVED.dataset || META_ALL.default) === meta.id);
+  if (sameDataset) {
     if (meta.variables[SAVED.var]) state.var = SAVED.var;
     if (meta.experiments[SAVED.experiment]) state.experiment = SAVED.experiment;
     if (meta.members.includes(SAVED.member)) state.member = SAVED.member;
@@ -2050,7 +2216,7 @@ async function init() {
   buildPlevDropdown();
   buildSeg(
     "exp-seg",
-    Object.keys(meta.experiments).map((k) => [k, EXP_SHORT[k] || k]),
+    Object.keys(meta.experiments).map((k) => [k, expShort(k)]),
     state.experiment,
     (v) => {
       state.experiment = v;
@@ -2065,7 +2231,7 @@ async function init() {
   );
   buildSeg(
     "exp-seg-b",
-    Object.keys(meta.experiments).map((k) => [k, EXP_SHORT[k] || k]),
+    Object.keys(meta.experiments).map((k) => [k, expShort(k)]),
     state.b.experiment,
     (v) => {
       state.b.experiment = v;
@@ -2081,9 +2247,17 @@ async function init() {
     () => state.b.member, (m) => (state.b.member = m));
 
   el("month-input").value =
-    (SAVED && SAVED.timeA) || meta.experiments[state.experiment].start;
+    (sameDataset && SAVED.timeA) || meta.experiments[state.experiment].start;
   el("month-input-b").value =
-    (SAVED && SAVED.timeB) || meta.experiments[state.b.experiment].start;
+    (sameDataset && SAVED.timeB) || meta.experiments[state.b.experiment].start;
+  // a remembered month outside the experiment (or the variable's own period) jumps to the start
+  for (const [id, exp] of [["month-input", state.experiment], ["month-input-b", state.b.experiment]]) {
+    const e = meta.experiments[exp];
+    const v = meta.variables[state.var];
+    const lo = (v.start && v.start > e.start) ? v.start : e.start;
+    const hi = (v.end && v.end < e.end) ? v.end : e.end;
+    if (el(id).value < lo || el(id).value > hi) el(id).value = lo;
+  }
   applyExperimentRange("month-input", state.experiment);
   applyExperimentRange("month-input-b", state.b.experiment);
   if (SAVED && SAVED.opacity != null) el("opacity").value = SAVED.opacity;
@@ -2099,11 +2273,12 @@ async function init() {
   }
 
   const STAT_OPTS = [["raw", "Member"], ["mean", "Mean"], ["spread", "Spread"], ["anom", "Deviation"]];
+  const N = meta.n_members;
   const STAT_INFO = {
     raw: "Single ensemble member — one physically consistent realization of the climate (choose which member below).",
-    mean: "Ensemble mean — the average of all 30 members; averages out internal variability to isolate the forced signal.",
-    spread: "Ensemble spread — the standard deviation across the 30 members (sample std, N−1); maps where internal variability is largest.",
-    anom: "Ensemble deviation — the selected member minus the 30-member ensemble mean; shows how far that member departs from the forced signal due to internal variability.",
+    mean: `Ensemble mean — the average of all ${N} members; averages out internal variability to isolate the forced signal.`,
+    spread: `Ensemble spread — the standard deviation across the ${N} members (sample std, N−1); maps where internal variability is largest.`,
+    anom: `Ensemble deviation — the selected member minus the ${N}-member ensemble mean; shows how far that member departs from the forced signal due to internal variability.`,
   };
   buildSeg("stat-seg", STAT_OPTS, state.stat, (v) => {
     state.stat = v;
@@ -2126,7 +2301,7 @@ async function init() {
       "Available months:\n" +
       Object.entries(meta.experiments)
         .map(([k, v]) =>
-          `${k === cur ? "▶ " : "   "}${EXP_SHORT[k] || k}: ${v.start} to ${v.end}`)
+          `${k === cur ? "▶ " : "   "}${expShort(k)}: ${v.start} to ${v.end}`)
         .join("\n")
     );
   };
@@ -2157,6 +2332,7 @@ async function init() {
   const download = (format) => {
     const params = new URLSearchParams({
       format,
+      dataset: state.dataset,
       var: state.var,
       experiment: state.experiment,
       member: state.member,
@@ -2627,7 +2803,7 @@ async function startPlayback(resume) {
   el("load-pct").textContent = "0%";
   el("load-note").innerHTML =
     `Fetching ${months.length} monthly frames` +
-    (state.stat !== "raw" ? " (ensemble statistics read all 30 members per month)" : "") +
+    (state.stat !== "raw" ? ` (ensemble statistics read all ${meta.n_members} members per month)` : "") +
     (isPlev ? " on the selected pressure level" : "") +
     ".<br>Cached months are instant; progress is real.";
   el("load-cancel").hidden = false;
@@ -2649,6 +2825,7 @@ async function startPlayback(resume) {
       if (withWind) {
         if (playback.abort) throw new Error("cancelled");
         const wp = {
+          dataset: state.dataset,
           experiment: state.experiment,
           member: state.stat === "raw" ? state.member : "ensmean",
           time: mth,
@@ -2664,7 +2841,7 @@ async function startPlayback(resume) {
     }
     // One shared color scale for the whole year so the legend/colors don't
     // flicker as auto-scaled fields rescale per month.
-    const cfg = VAR_CONFIG[state.var];
+    const cfg = varConfigFor(state.var);
     let lut;
     const statDyn = fields[0].stat === "anom" ? "div" : fields[0].stat === "spread" ? "seq" : null;
     const dynMode = statDyn || cfg.dynamic || null;
@@ -3625,7 +3802,7 @@ function tsShowProgress() {
   el("load-pct").textContent = "0%";
   el("load-note").innerHTML =
     "Reading one data chunk per month from the cloud store" +
-    (state.stat !== "raw" ? " (×30 members for ensemble statistics)" : "") +
+    (state.stat !== "raw" ? ` (×${meta.n_members} members for ensemble statistics)` : "") +
     ".<br>Progress shown is real, not estimated.";
   el("load-cancel").hidden = false;
 }
@@ -3720,6 +3897,7 @@ async function tsExtractFor(idx) {
     return;
   }
   const payload = {
+    dataset: state.dataset,
     var: state.var,
     experiment: state.experiment,
     member: state.member,
@@ -3797,6 +3975,7 @@ function chatEl(cls, text) {
 
 function viewSnapshot() {
   const snap = {
+    dataset: state.dataset,
     var: state.var,
     experiment: state.experiment,
     member: state.member,
@@ -3969,7 +4148,8 @@ const BOX_CORNERS = ["nw", "ne", "sw", "se"];
 const BOX_INFO_TEXT =
   "Drag a rectangle on the map (or type exact SW/NE corner coordinates) and " +
   "download every grid cell inside it for the current variable, scenario, " +
-  "statistic and level over the chosen month range (up to 10 years). Resize " +
+  "statistic and level over the chosen month range (any span within the scenario, subject to the " +
+  "size limit shown below). Resize " +
   "by dragging the corner handles; move by dragging the box itself. Files " +
   "carry the same provenance metadata as the other downloads, in the store's " +
   "native units; the CSV is long-form (time, lat, lon, value).";
@@ -4284,6 +4464,7 @@ function boxClear() {
 
 // ---- the card: selection summary, corner coordinates, month range, size
 function boxStatText() {
+  if (!meta.ensemble) return "single realization";
   return {
     raw: `member ${state.member}`,
     mean: "ensemble mean",
@@ -4312,7 +4493,7 @@ function boxRefresh() {
 
   const v = meta.variables[state.var];
   el("box-sel").textContent =
-    `${v.label} (${state.var}) · ${EXP_SHORT[state.experiment] || state.experiment} · ` +
+    `${v.label} (${state.var}) · ${expShort(state.experiment)} · ` +
     `${boxStatText()}${v.plev ? ` · ${state.plev} hPa` : ""}`;
 
   // month range: default to the displayed month; keep inside the scenario
@@ -4324,8 +4505,7 @@ function boxRefresh() {
   const maxEnd = boxMaxEnd(box.range.start, exp.end);
   if (box.range.end > maxEnd) box.range.end = maxEnd;
   for (const id of ["box-start", "box-end"]) {
-    el(id).min = exp.start;
-    el(id).max = exp.end;
+    el(id).title = `YYYY-MM (or just YYYY), ${exp.start} to ${exp.end}`;
   }
   boxSetInput("box-start", box.range.start);
   boxSetInput("box-end", box.range.end);
@@ -4338,7 +4518,9 @@ function boxRefresh() {
 }
 
 function boxMaxEnd(start, expEnd) {
-  const limit = ((meta && meta.box_limits && meta.box_limits.months) || 120) - 1;
+  const months = meta && meta.box_limits && meta.box_limits.months;
+  if (!months) return expEnd; // no month cap: the value limit bounds the size
+  const limit = months - 1;
   const [y, m] = start.split("-").map(Number);
   const total = (m - 1) + limit;
   const maxEnd = `${String(y + Math.floor(total / 12)).padStart(4, "0")}-${String((total % 12) + 1).padStart(2, "0")}`;
@@ -4351,7 +4533,7 @@ function boxFetchCells() {
     const b = box.bounds;
     if (!b) return;
     const params = new URLSearchParams({
-      var: state.var, experiment: state.experiment,
+      dataset: state.dataset, var: state.var, experiment: state.experiment,
       south: b.south, north: b.north, west: b.west, east: b.east,
     });
     try {
@@ -4467,7 +4649,7 @@ function boxRangeChanged(which) {
   let v = input.value.trim();
   if (/^\d{4}$/.test(v)) v = `${v}-${which === "start" ? "01" : "12"}`;
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(v)) {
-    setStatus("Box: type months as YYYY-MM", true);
+    setStatus("Box: type months as YYYY-MM (or just YYYY)", true);
     boxRefresh();
     return;
   }
@@ -4490,6 +4672,7 @@ function boxRangeChanged(which) {
 function boxPayload() {
   const b = box.bounds;
   const payload = {
+    dataset: state.dataset,
     var: state.var, experiment: state.experiment, member: state.member, stat: state.stat,
     box: { south: b.south, north: b.north, west: b.west, east: b.east },
     start: box.range.start, end: box.range.end,
@@ -4537,7 +4720,7 @@ function boxShowProgress(r) {
   el("load-note").innerHTML =
     `${r.cells.toLocaleString()} grid cells × ${r.months} month${r.months === 1 ? "" : "s"}. ` +
     "Reading one data chunk per month from the cloud store" +
-    (state.stat !== "raw" ? " (×30 members for ensemble statistics)" : "") +
+    (state.stat !== "raw" ? ` (×${meta.n_members} members for ensemble statistics)` : "") +
     ".<br>Progress shown is real, not estimated.";
   el("load-cancel").hidden = false;
 }
@@ -4622,6 +4805,9 @@ el("box-lock").addEventListener("change", (e) => {
 });
 el("box-start").addEventListener("change", () => boxRangeChanged("start"));
 el("box-end").addEventListener("change", () => boxRangeChanged("end"));
+for (const id of ["box-start", "box-end"]) {
+  el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+}
 el("box-info").addEventListener("click", (e) => {
   e.stopPropagation();
   showInfoPopover(BOX_INFO_TEXT, e.clientX, e.clientY);
@@ -5378,7 +5564,7 @@ function snapTitle() {
   const d = currentDisplay;
   if (!d) return "";
   if (d.isDiff) return `${d.label} · A: ${selLabel(currentField)} · B: ${selLabel(currentFieldB)}`;
-  return `${statPrefix(d)}${d.label} · ${EXP_SHORT[state.experiment] || state.experiment} · ${selLabel(d)}`;
+  return `${statPrefix(d)}${d.label} · ${expShort(state.experiment)} · ${selLabel(d)}`;
 }
 
 // shot: canvas at device resolution covering imgW×imgH CSS px.

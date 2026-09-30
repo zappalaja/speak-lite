@@ -11,6 +11,10 @@ python-dotenv>=1.0
 matplotlib>=3.9
 netCDF4>=1.7
 
+# Local NetCDF collections as virtual Icechunk stores (tools/nc_catalog.py)
+virtualizarr[hdf,icechunk]>=2.7
+kerchunk>=0.2.10        # NetCDF-3 (classic / 64-bit offset) parser backend
+
 # RAG service (SPEAK document retrieval) — the heavy part; the viewer runs
 # fine without it (SPEAK just loses publication citations).
 pydantic>=2.7

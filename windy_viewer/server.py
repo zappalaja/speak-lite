@@ -1,8 +1,10 @@
-"""Local Windy-style viewer for SPEAR-MED.
+"""Local Windy-style viewer for gridded monthly climate data.
 
 Serves a Leaflet frontend plus a small JSON API that pulls single
-(variable, experiment, member, month) fields from the ArrayLake repo
-GFDL/noaa-gfdl-spear-large-ensembles-pds and caches them on disk.
+(dataset, variable, experiment, member, month) fields from the configured
+data sources — ArrayLake repos and/or local NetCDF collections catalogued
+by tools/nc_catalog.py (see sources.py, datasets.example.json) — and
+caches them on disk.
 
 Run:  python server.py   (inside the `spear` conda env)
 Then open http://localhost:8601
@@ -92,124 +94,36 @@ def _cache_put(path: Path, body: bytes):
 # .env, falling back to ~/.arraylake/token.json from `arraylake auth login`.
 load_dotenv(BASE_DIR.parent / ".env")
 
-ARRAYLAKE_REPO = "GFDL/noaa-gfdl-spear-large-ensembles-pds"
-ARRAYLAKE_BRANCH = "main"
-FREQUENCY = "Amon"
+from sources import load_sources  # noqa: E402  (after load_dotenv: ArrayLake token)
 
-EXPERIMENTS = {
-    "historical": {"start": "1921-01", "end": "2014-12"},
-    "scenarioSSP5-85": {"start": "2015-01", "end": "2100-12"},
-}
-
-# scale/offset convert stored units to display units. group selects the
-# Zarr group ("Amon" or "Omon"); plev marks 3-D fields on pressure levels.
-VARIABLES = {
-    "pr": {
-        "scale": 86400.0, "offset": 0.0, "units": "mm/day",
-        "label": "Precipitation", "long": "Precipitation",
-        "group": "Amon", "plev": False,
-    },
-    "tas": {
-        "scale": 1.0, "offset": -273.15, "units": "°C",
-        "label": "Temperature (2 m)", "long": "Near-Surface Air Temperature (2 m height)",
-        "group": "Amon", "plev": False,
-    },
-    "psl": {
-        # SPEAR stores psl already in hPa (not Pa as CMIP convention would
-        # suggest) — verified against the store's units attribute.
-        "scale": 1.0, "offset": 0.0, "units": "hPa",
-        "label": "Sea-level pressure", "long": "Sea Level Pressure",
-        "group": "Amon", "plev": False,
-    },
-    "sfcWind": {
-        "scale": 1.0, "offset": 0.0, "units": "m/s",
-        "label": "Wind speed (10 m)", "long": "Near-Surface Wind Speed (10 m height)",
-        "group": "Amon", "plev": False,
-    },
-    "uas": {
-        "scale": 1.0, "offset": 0.0, "units": "m/s",
-        "label": "Zonal wind (10 m)", "long": "Eastward Near-Surface Wind (10 m height)",
-        "group": "Amon", "plev": False,
-    },
-    "vas": {
-        "scale": 1.0, "offset": 0.0, "units": "m/s",
-        "label": "Meridional wind (10 m)", "long": "Northward Near-Surface Wind (10 m height)",
-        "group": "Amon", "plev": False,
-    },
-    "rlut": {
-        "scale": 1.0, "offset": 0.0, "units": "W/m²",
-        "label": "OLR (TOA)", "long": "TOA Outgoing Longwave Radiation",
-        "group": "Amon", "plev": False,
-    },
-    "rsut": {
-        "scale": 1.0, "offset": 0.0, "units": "W/m²",
-        "label": "Reflected SW (TOA)", "long": "TOA Outgoing Shortwave Radiation",
-        "group": "Amon", "plev": False,
-    },
-    "rsdt": {
-        "scale": 1.0, "offset": 0.0, "units": "W/m²",
-        "label": "Incoming solar (TOA)", "long": "TOA Incident Shortwave Radiation",
-        "group": "Amon", "plev": False,
-    },
-    "ta": {
-        "scale": 1.0, "offset": -273.15, "units": "°C",
-        "label": "Air temperature", "long": "Air Temperature (on pressure level)",
-        "group": "Amon", "plev": True,
-    },
-    "ua": {
-        "scale": 1.0, "offset": 0.0, "units": "m/s",
-        "label": "Zonal wind", "long": "Eastward Wind (on pressure level)",
-        "group": "Amon", "plev": True,
-    },
-    "va": {
-        "scale": 1.0, "offset": 0.0, "units": "m/s",
-        "label": "Meridional wind", "long": "Northward Wind (on pressure level)",
-        "group": "Amon", "plev": True,
-    },
-    "zg": {
-        "scale": 1.0, "offset": 0.0, "units": "m",
-        "label": "Geopot. height", "long": "Geopotential Height (on pressure level)",
-        "group": "Amon", "plev": True,
-    },
-    "hus": {
-        "scale": 1.0, "offset": 0.0, "units": "kg/kg",
-        "label": "Specific humidity", "long": "Specific Humidity (on pressure level)",
-        "group": "Amon", "plev": True,
-    },
-    "tos": {
-        "scale": 1.0, "offset": 0.0, "units": "°C",
-        "label": "SST", "long": "Sea Surface Temperature (ocean, 1° grid)",
-        "group": "Omon", "plev": False,
-    },
-}
-
-_lock = threading.Lock()
-_session = None
-_datasets: dict[str, xr.Dataset] = {}
+# Configured data sources (datasets.json / VIEWER_DATASETS, else the
+# built-in SPEAR definition). Each opens lazily on first use; see sources.py.
+SOURCES = load_sources()
+DEFAULT_SOURCE = next(iter(SOURCES))
+STATS = ("raw", "mean", "spread", "anom")
 
 
-def _get_dataset(experiment: str, group_name: str = "Amon") -> xr.Dataset:
-    global _session
-    group = f"{experiment}/{group_name}"
-    with _lock:
-        if group not in _datasets:
-            if _session is None:
-                from arraylake import Client
-
-                repo = Client().get_repo(ARRAYLAKE_REPO)
-                _session = repo.readonly_session(branch=ARRAYLAKE_BRANCH)
-            _datasets[group] = xr.open_zarr(
-                _session.store, group=group, consolidated=False
-            )
-        return _datasets[group]
+def _src(dataset: str | None):
+    key = dataset or DEFAULT_SOURCE
+    s = SOURCES.get(key)
+    if s is None:
+        raise HTTPException(400, f"unknown dataset {key!r}")
+    try:
+        return s.ensure()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(503, f"dataset {key!r} unavailable: {str(e)[:200]}")
 
 
-def _members(ds: xr.Dataset) -> list[str]:
-    ids = [str(m) for m in ds.member_id.values]
-    return sorted(ids, key=lambda m: int(m.split("i")[0][1:]))
+def _open(src, experiment: str, var: str) -> xr.Dataset:
+    """src.open() with unknown names mapped to HTTP 400."""
+    if var not in src.variables:
+        raise HTTPException(400, f"unknown variable {var!r}")
+    if experiment not in src.experiments:
+        raise HTTPException(400, f"unknown experiment {experiment!r}")
+    return src.open(experiment, var)
 
 
-app = FastAPI(title="SPEAR windy viewer")
+app = FastAPI(title="windy viewer")
 
 
 @app.middleware("http")
@@ -265,12 +179,11 @@ def _warm_datasets():
 
     def warm():
         _ensure_rag_service()
-        for exp in EXPERIMENTS:
-            for grp in ("Amon", "Omon"):
-                try:
-                    _get_dataset(exp, grp)
-                except Exception:
-                    pass
+        for s in SOURCES.values():
+            try:
+                s.ensure()
+            except Exception as e:  # noqa: BLE001
+                print(f"[viewer] dataset {s.id!r} failed to open: {e}")
 
     threading.Thread(target=warm, daemon=True).start()
 
@@ -294,30 +207,27 @@ def config_js():
 
 @app.get("/api/meta")
 def meta():
-    ds = _get_dataset("scenarioSSP5-85")
-    levels = [int(round(float(p) / 100)) for p in ds.plev.values.tolist()]
-    experiments = {}
-    for k, v in EXPERIMENTS.items():
-        attrs = _get_dataset(k).attrs
-        desc = attrs.get("experiment", k)
-        forcing = attrs.get("forcing", "")
-        experiments[k] = {**v, "long": f"{desc}" + (f" — forcing: {forcing}" if forcing else "")}
+    datasets = []
+    for src in SOURCES.values():
+        try:
+            datasets.append(src.meta())
+        except Exception as e:  # noqa: BLE001
+            datasets.append({"id": src.id, "title": src.title, "error": str(e)[:200]})
+    first = next((d for d in datasets if "error" not in d), None)
+    if first is None:
+        raise HTTPException(503, "no dataset is reachable: "
+                            + "; ".join(f"{d['id']}: {d.get('error', '')}" for d in datasets))
     return {
-        "repo": ARRAYLAKE_REPO,
-        "frequency": FREQUENCY,
-        "experiments": experiments,
-        "variables": {
-            k: {kk: v[kk] for kk in ("units", "label", "long", "plev", "group")}
-            for k, v in VARIABLES.items()
-        },
-        "levels": levels,
-        "members": _members(ds),
+        "datasets": datasets,
+        "default": first["id"],
+        # flat copies of the default dataset (pre-multi-dataset frontend API)
+        "experiments": first["experiments"],
+        "variables": first["variables"],
+        "levels": first["levels"],
+        "members": first["members"],
         "ts_limits": {"months": TS_MAX_MONTHS},
-        "box_limits": {"months": BOX_MAX_MONTHS, "values": BOX_MAX_VALUES},
+        "box_limits": {"months": BOX_MAX_MONTHS or None, "values": BOX_MAX_VALUES},
     }
-
-
-STATS = ("raw", "mean", "spread", "anom")
 
 
 def _stat_token(stat: str, member: str) -> str:
@@ -327,37 +237,30 @@ def _stat_token(stat: str, member: str) -> str:
     )
 
 
-def _select_stat(ds: xr.Dataset, var: str, member: str, time: str, stat: str) -> xr.DataArray:
+def _select_stat(src, ds: xr.Dataset, var: str, member: str, time: str, stat: str) -> xr.DataArray:
     """One month of: a single member, the ensemble mean, the ensemble
-    spread (sample std, ddof=1), or a member's deviation from the mean."""
+    spread (sample std, ddof=1), or a member's deviation from the mean.
+    Datasets without an ensemble dimension return the field itself."""
     da = ds[var].sel(time=slice(time, time))
     if da.sizes.get("time", 0) == 0:
         raise HTTPException(404, f"no timestep for {time}")
     da = da.isel(time=0)
-    if stat == "mean":
-        return da.mean("member_id", keep_attrs=True)
-    if stat == "spread":
-        return da.std("member_id", ddof=1, keep_attrs=True)
-    if member not in set(str(m) for m in ds.member_id.values):
+    try:
+        return src.reduce(da, stat, member)
+    except KeyError:
         raise HTTPException(400, f"unknown member {member!r}")
-    if stat == "anom":
-        res = da.sel(member_id=member) - da.mean("member_id")
-        res.attrs = dict(da.attrs)
-        return res
-    return da.sel(member_id=member)
 
 
-def _select_month(ds: xr.Dataset, var: str, member: str, time: str) -> xr.DataArray:
-    da = ds[var].sel(time=slice(time, time))
-    if da.sizes.get("time", 0) == 0:
-        raise HTTPException(404, f"no timestep for {time}")
-    da = da.isel(time=0)
-    if member == "ensmean":
-        # Average across all 30 members (reads one chunk per member).
-        return da.mean("member_id", keep_attrs=True)
-    if member not in set(str(m) for m in ds.member_id.values):
-        raise HTTPException(400, f"unknown member {member!r}")
-    return da.sel(member_id=member)
+def _level_group(src, ds, da, lev):
+    """Stores that chunk the level dimension in groups (SPEAR: 9 levels per
+    chunk) make one level cost the whole group's download. Return the
+    loaded group containing `lev` (hPa) so every level in it can be cached."""
+    ldim = src.level_dim
+    lvals = ds[ldim].values
+    idx = int(np.argmin(np.abs(lvals - lev * src.level_scale)))
+    k = max(1, int(src.level_chunk))
+    g0 = (idx // k) * k
+    return _load_da(da.isel({ldim: slice(g0, min(g0 + k, lvals.size))}))
 
 
 def _grid_meta(ds: xr.Dataset) -> dict:
@@ -428,65 +331,58 @@ def field(
     experiment: str = Query("scenarioSSP5-85"),
     member: str = Query("r1i1p1f1"),
     time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}$"),
-    plev: float = Query(500, gt=0),
+    plev: float | None = Query(None, gt=0),
     stat: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
+    dataset: str | None = Query(None),
 ):
-    if var not in VARIABLES:
-        raise HTTPException(400, f"unknown variable {var!r}")
-    if experiment not in EXPERIMENTS:
-        raise HTTPException(400, f"unknown experiment {experiment!r}")
+    src = _src(dataset)
+    ds = _open(src, experiment, var)
     if member == "ensmean" and stat == "raw":
         stat = "mean"  # back-compat with the pre-statistic API
+    if not src.ensemble_dim:
+        stat, member = "raw", ""
 
-    cfg = VARIABLES[var]
+    cfg = src.variables[var]
     token = _stat_token(stat, member)
-    suffix = f"_p{int(plev)}" if cfg["plev"] else ""
-    cache_path = (
-        CACHE_DIR / f"{var}_{experiment}_{cfg['group']}_{token}_{time}{suffix}.json"
-    )
+    lev = src.nearest_level(plev) if cfg["plev"] else None
+    suffix = f"_p{lev}" if lev is not None else ""
+    cache_path = CACHE_DIR / f"{src.id}_{var}_{experiment}_{token}_{time}{suffix}.json"
     cached = _cache_get(cache_path)
     if cached is not None:
         return cached
 
-    ds = _get_dataset(experiment, cfg["group"])
-    da = _select_stat(ds, var, member, time, stat)
+    da = _select_stat(src, ds, var, member, time, stat)
     grid = _grid_meta(ds)
     shift = grid.pop("_shift")
     # spread/deviation are difference-like: the unit offset cancels (a 2 K
     # spread is 2 °C of spread, not -271 °C).
     offset = 0.0 if stat in ("spread", "anom") else cfg["offset"]
 
-    def payload_bytes(da2d, lev):
+    def payload_bytes(da2d, lev_k):
         values, vmin, vmax = _extract(da2d, shift, cfg["scale"], offset)
         payload = {
-            "var": var, "label": cfg["label"], "units": cfg["units"],
+            "dataset": src.id, "var": var, "label": cfg["label"], "units": cfg["units"],
             "experiment": experiment, "member": member, "stat": stat, "time": time,
             "time_label": str(da2d.time.values),
-            "plev": lev,
+            "plev": lev_k,
             **grid,
             "vmin": vmin, "vmax": vmax, "values": values,
         }
         return json.dumps(payload, separators=(",", ":")).encode()
 
-    if cfg["plev"]:
-        # The store chunks the level dimension in groups of 9, so a single
-        # level costs the whole group's download anyway. Load the group
-        # once and cache every level in it. Sibling levels become free.
-        plevs = ds.plev.values
-        idx = int(np.argmin(np.abs(plevs - plev * 100.0)))
-        g0 = (idx // 9) * 9
-        group = _load_da(da.isel(plev=slice(g0, min(g0 + 9, plevs.size))))
+    if lev is not None:
+        ldim = src.level_dim
+        group = _level_group(src, ds, da, lev)
         body = None
-        for k in range(group.sizes["plev"]):
-            da_k = group.isel(plev=k)
-            lev_k = int(round(float(da_k.plev.values) / 100))
+        for k in range(group.sizes[ldim]):
+            da_k = group.isel({ldim: k})
+            lev_k = src.level_hpa(da_k)
             body_k = payload_bytes(da_k, lev_k)
-            _cache_put(
-                CACHE_DIR / f"{var}_{experiment}_{cfg['group']}_{token}_{time}_p{lev_k}.json",
-                body_k,
-            )
-            if lev_k == int(round(float(plevs[idx]) / 100)):
+            _cache_put(CACHE_DIR / f"{src.id}_{var}_{experiment}_{token}_{time}_p{lev_k}.json", body_k)
+            if lev_k == lev:
                 body = body_k
+        if body is None:
+            body = payload_bytes(_load_da(src.level_select(da, lev)), lev)
     else:
         body = payload_bytes(_load_da(da), None)
         _cache_put(cache_path, body)
@@ -499,141 +395,109 @@ def wind(
     member: str = Query("r1i1p1f1"),
     time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}$"),
     plev: float | None = Query(None, gt=0),
+    dataset: str | None = Query(None),
 ):
-    """Wind components for the particle animation: near-surface (uas, vas)
-    by default, or ua/va at the requested pressure level (hPa)."""
-    if experiment not in EXPERIMENTS:
-        raise HTTPException(400, f"unknown experiment {experiment!r}")
-
-    suffix = f"_p{int(plev)}" if plev else ""
-    cache_path = CACHE_DIR / f"wind_{experiment}_{FREQUENCY}_{member}_{time}{suffix}.json"
+    """Wind components for the particle animation: the dataset's
+    near-surface (u, v) pair by default, or its pressure-level pair at the
+    requested level (hPa). 404 when the dataset has no wind components."""
+    src = _src(dataset)
+    pair = src.wind["plev"] if plev else src.wind["sfc"]
+    if not pair:
+        raise HTTPException(404, "this dataset has no wind components")
+    uname, vname = pair
+    ds = _open(src, experiment, uname)
+    ds_v = _open(src, experiment, vname)
+    lev = src.nearest_level(plev) if plev else None
+    suffix = f"_p{lev}" if lev is not None else ""
+    cache_path = CACHE_DIR / f"{src.id}_wind_{experiment}_{member}_{time}{suffix}.json"
     cached = _cache_get(cache_path)
     if cached is not None:
         return cached
 
-    ds = _get_dataset(experiment)
     grid = _grid_meta(ds)
     shift = grid.pop("_shift")
+    stat = "mean" if member == "ensmean" else "raw"
+    if not src.ensemble_dim:
+        stat, member = "raw", ""
+    units = src.variables[uname]["units"] or "m/s"
 
-    def wind_payload_bytes(da_u2d, da_v2d, lev):
+    def wind_payload_bytes(da_u2d, da_v2d, lev_k):
         u_values, _, _ = _extract(da_u2d, shift, 1.0, 0.0)
         v_values, _, _ = _extract(da_v2d, shift, 1.0, 0.0)
         payload = {
-            "units": "m/s", "experiment": experiment, "member": member,
-            "time": time, "plev": lev, **grid,
+            "units": units, "dataset": src.id, "experiment": experiment, "member": member,
+            "time": time, "plev": lev_k, **grid,
             "u": u_values, "v": v_values,
         }
         return json.dumps(payload, separators=(",", ":")).encode()
 
-    if plev:
-        # Cache the whole 9-level chunk group (see /api/field).
-        plevs = ds.plev.values
-        idx = int(np.argmin(np.abs(plevs - plev * 100.0)))
-        g0 = (idx // 9) * 9
-        sl = slice(g0, min(g0 + 9, plevs.size))
-        u_group = _load_da(_select_month(ds, "ua", member, time).isel(plev=sl))
-        v_group = _load_da(_select_month(ds, "va", member, time).isel(plev=sl))
+    da_u = _select_stat(src, ds, uname, member, time, stat)
+    da_v = _select_stat(src, ds_v, vname, member, time, stat)
+    if lev is not None:
+        ldim = src.level_dim
+        u_group = _level_group(src, ds, da_u, lev)
+        v_group = _level_group(src, ds_v, da_v, lev)
         body = None
-        for k in range(u_group.sizes["plev"]):
-            lev_k = int(round(float(u_group.plev.values[k]) / 100))
-            body_k = wind_payload_bytes(u_group.isel(plev=k), v_group.isel(plev=k), lev_k)
-            _cache_put(
-                CACHE_DIR / f"wind_{experiment}_{FREQUENCY}_{member}_{time}_p{lev_k}.json",
-                body_k,
-            )
-            if lev_k == int(round(float(plevs[idx]) / 100)):
+        for k in range(u_group.sizes[ldim]):
+            lev_k = src.level_hpa(u_group.isel({ldim: k}))
+            body_k = wind_payload_bytes(u_group.isel({ldim: k}), v_group.isel({ldim: k}), lev_k)
+            _cache_put(CACHE_DIR / f"{src.id}_wind_{experiment}_{member}_{time}_p{lev_k}.json", body_k)
+            if lev_k == lev:
                 body = body_k
+        if body is None:
+            body = wind_payload_bytes(_load_da(src.level_select(da_u, lev)),
+                                      _load_da(src.level_select(da_v, lev)), lev)
     else:
-        body = wind_payload_bytes(
-            _load_da(_select_month(ds, "uas", member, time)),
-            _load_da(_select_month(ds, "vas", member, time)),
-            None,
-        )
+        body = wind_payload_bytes(_load_da(da_u), _load_da(da_v), None)
         _cache_put(cache_path, body)
     return Response(body, media_type="application/json")
 
 
 # ---------------------------------------------------------------- download
-def _native_month(
-    experiment: str, var: str, member: str, time: str,
-    plev: float | None = None, stat: str = "raw",
-) -> xr.DataArray:
+def _native_month(src, experiment: str, var: str, member: str, time: str,
+                  plev: float | None = None, stat: str = "raw") -> xr.DataArray:
     """One month of the requested statistic in the store's native units
     and native 0-360 longitudes, with original attrs, loaded."""
-    if experiment not in EXPERIMENTS:
-        raise HTTPException(400, f"unknown experiment {experiment!r}")
-    cfg = VARIABLES.get(var)
-    if cfg is None:
-        raise HTTPException(400, f"unknown variable {var!r}")
-    ds = _get_dataset(experiment, cfg["group"])
-    da = _select_stat(ds, var, member, time, stat)
+    ds = _open(src, experiment, var)
+    cfg = src.variables[var]
+    if not src.ensemble_dim:
+        stat, member = "raw", ""
+    da = _select_stat(src, ds, var, member, time, stat)
     if cfg["plev"]:
-        da = da.sel(plev=(plev or 500) * 100.0, method="nearest")
+        da = src.level_select(da, plev)
     da = _load_da(da)
-    if "member_id" in da.coords:
-        da = da.drop_vars("member_id")
-    long = da.attrs.get("long_name", var)
-    if stat == "spread":
-        da.attrs["long_name"] = f"ensemble standard deviation (ddof=1, N=30) of {long}"
-    elif stat == "anom":
-        da.attrs["long_name"] = f"member {member} minus ensemble mean of {long}"
-    elif stat == "mean":
-        da.attrs["long_name"] = f"ensemble mean (30 members) of {long}"
+    if src.ensemble_dim and src.ensemble_dim in da.coords:
+        da = da.drop_vars(src.ensemble_dim)
+    da.attrs["long_name"] = src.stat_long_name(stat, member, da.attrs.get("long_name", var))
     return da
 
 
-def _stat_text(stat: str, member: str) -> str:
-    return {
-        "raw": f"member {member}",
-        "mean": "ensemble mean of all 30 members",
-        "spread": "ensemble spread (standard deviation, ddof=1, across 30 members)",
-        "anom": f"deviation: member {member} minus the 30-member ensemble mean",
-    }[stat]
-
-
-def _sel_text(experiment: str, member: str, time: str,
+def _sel_text(src, experiment: str, member: str, time: str,
               da: xr.DataArray = None, stat: str = "raw") -> str:
     if member == "ensmean" and stat == "raw":
         stat = "mean"
-    text = f"experiment {experiment}, {_stat_text(stat, member)}, month {time}"
-    if da is not None and "plev" in da.coords:
-        text += f", pressure level {int(round(float(da.plev.values) / 100))} hPa"
+    text = f"experiment {experiment}, {src.stat_text(stat, member)}, month {time}"
+    lev = src.level_hpa(da) if da is not None else None
+    if lev is not None:
+        text += f", pressure level {lev} hPa"
     return text
 
 
-# Original store attributes worth carrying into downloads. Member-specific
-# keys (realization, parent_experiment_rip, tracking_id, per-file history,
-# creation_date, run-numbered title) are deliberately omitted: the group's
-# copies describe whichever single run seeded the Zarr consolidation, which
-# is generally NOT the member being subset.
-MODEL_LEVEL_KEYS = [
-    "Conventions", "institution", "institute_id", "model_id", "modeling_realm",
-    "product", "project_id", "source", "references", "license", "contact",
-    "table_id", "initialization_method", "physics_version", "external_variables",
-]
-EXPERIMENT_LEVEL_KEYS = [
-    "experiment", "experiment_id", "forcing", "branch_method", "parent_experiment_id",
-]
-
-
-def _source_attrs(ds: xr.Dataset, include_experiment: bool = True) -> dict:
-    keys = MODEL_LEVEL_KEYS + (EXPERIMENT_LEVEL_KEYS if include_experiment else [])
-    return {k: ds.attrs[k] for k in keys if k in ds.attrs}
-
-
-def _global_attrs(var: str, src: dict, extra: dict) -> dict:
-    attrs = dict(src)
+def _global_attrs(src, var: str, base: dict, extra: dict) -> dict:
+    """Download metadata: the source's own global attributes (base) plus
+    what this viewer knows about the subset."""
+    attrs = dict(base)
     attrs.update({
-        "title": f"SPEAR-MED subset: {var}",
-        "source_store": f"arraylake://{ARRAYLAKE_REPO} (branch {ARRAYLAKE_BRANCH})",
-        "grid": "0.5 deg lat x 0.625 deg lon (gr3), longitudes 0-360",
-        "time_calendar": "julian",
+        "title": f"{src.title} subset: {var}",
+        "source_store": src.store_text,
+        "grid": src.grid_text,
+        "time_calendar": src.calendar,
         "metadata_note": "global attributes above are inherited from the source "
-                         "store; member-specific source fields (realization, "
-                         "tracking_id, per-file history) are omitted — see "
+                         "store; per-file and per-member fields (realization, "
+                         "tracking_id, filename, history) are omitted — see "
                          "'selection' for what this subset contains",
         "history": f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}: "
-                   "subset extracted by SPEAR windy viewer",
+                   f"subset extracted by windy viewer (dataset {src.id})",
     })
     attrs.update(extra)
     return attrs
@@ -693,25 +557,28 @@ def download(
     experiment: str = Query("scenarioSSP5-85"),
     member: str = Query("r1i1p1f1"),
     time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}$"),
-    plev: float = Query(500, gt=0),
+    plev: float | None = Query(None, gt=0),
     stat: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
     compare: bool = Query(False),
     experiment_b: str = Query("scenarioSSP5-85"),
     member_b: str = Query("r2i1p1f1"),
     time_b: str = Query("2030-01", pattern=r"^\d{4}-\d{2}$"),
     stat_b: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
+    dataset: str | None = Query(None),
 ):
     """Download the currently-viewed subset (or A-B comparison) with
     descriptive metadata, in the store's native units and coordinates."""
+    src = _src(dataset)
     if member == "ensmean" and stat == "raw":
         stat = "mean"
     if member_b == "ensmean" and stat_b == "raw":
         stat_b = "mean"
-    da_a = _native_month(experiment, var, member, time, plev, stat)
-    lev_suffix = f"_{int(plev)}hPa" if VARIABLES[var]["plev"] else ""
+    da_a = _native_month(src, experiment, var, member, time, plev, stat)
+    lev = src.level_hpa(da_a)
+    lev_suffix = f"_{lev}hPa" if lev is not None else ""
 
     if compare:
-        da_b = _native_month(experiment_b, var, member_b, time_b, plev, stat_b)
+        da_b = _native_month(src, experiment_b, var, member_b, time_b, plev, stat_b)
         time_a_val = str(da_a.time.values) if "time" in da_a.coords else time
         time_b_val = str(da_b.time.values) if "time" in da_b.coords else time_b
         a_vals = da_a.drop_vars("time", errors="ignore")
@@ -728,13 +595,12 @@ def download(
             {f"{var}_diff": diff, f"{var}_a": a_vals, f"{var}_b": b_vals}
         )
         same_exp = experiment == experiment_b
-        grp = VARIABLES[var]["group"]
-        src = _source_attrs(_get_dataset(experiment, grp), include_experiment=same_exp)
+        base = src.download_attrs(experiment, var, include_experiment=same_exp)
         extra = {
-            "title": f"SPEAR-MED comparison subset: {var} (A minus B)",
+            "title": f"{src.title} comparison subset: {var} (A minus B)",
             "comparison": "A - B (pointwise difference on the native grid)",
-            "selection_A": _sel_text(experiment, member, time, da_a, stat),
-            "selection_B": _sel_text(experiment_b, member_b, time_b, da_b, stat_b),
+            "selection_A": _sel_text(src, experiment, member, time, da_a, stat),
+            "selection_B": _sel_text(src, experiment_b, member_b, time_b, da_b, stat_b),
             "time_A_value": time_a_val,
             "time_B_value": time_b_val,
             "note": f"{var}_diff = {var}_a - {var}_b; all fields share the "
@@ -743,11 +609,11 @@ def download(
         if not same_exp:
             # Experiment-level attrs differ between A and B; record each.
             for label, exp in (("A", experiment), ("B", experiment_b)):
-                exp_attrs = _get_dataset(exp, grp).attrs
+                exp_attrs = src.experiment_attrs(exp)
                 extra[f"experiment_{label}_id"] = exp_attrs.get("experiment_id", exp)
                 extra[f"experiment_{label}_description"] = exp_attrs.get("experiment", "")
                 extra[f"experiment_{label}_forcing"] = exp_attrs.get("forcing", "")
-        ds_out.attrs = _global_attrs(var, src, extra)
+        ds_out.attrs = _global_attrs(src, var, base, extra)
         columns = [f"{var}_diff", f"{var}_a", f"{var}_b"]
         stem = (
             f"{var}_diff_{experiment}_{_stat_token(stat, member)}_{time}"
@@ -755,10 +621,9 @@ def download(
         )
     else:
         ds_out = da_a.to_dataset(name=var)
-        src = _source_attrs(_get_dataset(experiment, VARIABLES[var]["group"]))
-        ds_out.attrs = _global_attrs(var, src, {
-            "selection": _sel_text(experiment, member, time, da_a, stat),
-            "statistic": _stat_text(stat, member),
+        ds_out.attrs = _global_attrs(src, var, src.download_attrs(experiment, var), {
+            "selection": _sel_text(src, experiment, member, time, da_a, stat),
+            "statistic": src.stat_text(stat, member),
             "time_value": str(da_a.time.values) if "time" in da_a.coords else time,
         })
         columns = [var]
@@ -820,8 +685,9 @@ def _ts_month_list(start: str, end: str):
 def _run_ts_job(job_id: str, p: dict):
     job = _ts_jobs[job_id]
     try:
-        cfg = VARIABLES[p["var"]]
-        ds = _get_dataset(p["experiment"], cfg["group"])
+        src = _src(p["dataset"])
+        cfg = src.variables[p["var"]]
+        ds = src.open(p["experiment"], p["var"])
         lat = ds.lat.values.astype(float)
         lon = ds.lon.values.astype(float)
         ilats, ilons, plats, plons = [], [], [], []
@@ -843,16 +709,9 @@ def _run_ts_job(job_id: str, p: dict):
                 return
             batch = months[b0:b0 + TS_BATCH_MONTHS]
             da = ds[p["var"]].sel(time=slice(batch[0], batch[-1]))
-            if stat == "mean":
-                da = da.mean("member_id")
-            elif stat == "spread":
-                da = da.std("member_id", ddof=1)
-            elif stat == "anom":
-                da = da.sel(member_id=p["member"]) - da.mean("member_id")
-            else:
-                da = da.sel(member_id=p["member"])
+            da = src.reduce(da, stat, p["member"])
             if cfg["plev"]:
-                da = da.sel(plev=(p.get("plev") or 500) * 100.0, method="nearest")
+                da = src.level_select(da, p.get("plev"))
             da = da.isel(
                 lat=xr.DataArray(ilats, dims="station"),
                 lon=xr.DataArray(ilons, dims="station"),
@@ -862,7 +721,7 @@ def _run_ts_job(job_id: str, p: dict):
             all_vals.append(np.asarray(da.values, dtype=np.float64))
             job["progress"] = min(0.97, (b0 + len(batch)) / len(months))
         data = np.concatenate(all_vals, axis=0) * cfg["scale"] + offset
-        lev_txt = f" · {int(p['plev'])} hPa" if cfg["plev"] else ""
+        lev_txt = f" · {p['plev']} hPa" if cfg["plev"] else ""
         sids = p.get("station_ids") or [k + 1 for k in range(len(plats))]
         labels = [
             (f"St {sids[k]} ({_loc_str(plats[k], plons[k])})" if sids[k] > 0
@@ -880,7 +739,7 @@ def _run_ts_job(job_id: str, p: dict):
             "plats": plats,
             "plons": plons,
             "units": cfg["units"],
-            "title": f"{_stat_text(stat, p['member'])} — {p['var']} · "
+            "title": f"{src.stat_text(stat, p['member'])} — {p['var']} · "
                      f"{p['experiment']}{lev_txt}",
             "params": p,
         }
@@ -932,20 +791,21 @@ def _ts_plot_png(r) -> bytes:
 
 @app.post("/api/timeseries/start")
 def ts_start(payload: dict):
+    src = _src(payload.get("dataset"))
     var = payload.get("var")
-    if var not in VARIABLES:
-        raise HTTPException(400, f"unknown variable {var!r}")
     experiment = payload.get("experiment")
-    if experiment not in EXPERIMENTS:
-        raise HTTPException(400, f"unknown experiment {experiment!r}")
+    _open(src, experiment, var)
     stat = payload.get("stat", "raw")
     if stat not in STATS:
         raise HTTPException(400, f"unknown stat {stat!r}")
+    member = payload.get("member", "r1i1p1f1")
+    if not src.ensemble_dim:
+        stat, member = "raw", ""
     points = payload.get("points") or []
     if not (1 <= len(points) <= TS_MAX_STATIONS):
         raise HTTPException(400, f"1-{TS_MAX_STATIONS} stations required")
     start, end = payload.get("start", ""), payload.get("end", "")
-    exp = EXPERIMENTS[experiment]
+    exp = src.experiments[experiment]
     if not (exp["start"] <= start <= end <= exp["end"]):
         raise HTTPException(400, f"range must lie within {exp['start']}..{exp['end']}")
     months = _ts_month_list(start, end)
@@ -961,9 +821,9 @@ def ts_start(payload: dict):
         station_ids = None
     job_id = uuid.uuid4().hex[:12]
     params = {
-        "var": var, "experiment": experiment, "member": payload.get("member", "r1i1p1f1"),
-        "stat": stat, "plev": payload.get("plev"), "points": points,
-        "station_ids": station_ids,
+        "dataset": src.id, "var": var, "experiment": experiment, "member": member,
+        "stat": stat, "plev": src.nearest_level(payload.get("plev")) if src.variables[var]["plev"] else None,
+        "points": points, "station_ids": station_ids,
         "months": months, "start": start, "end": end,
     }
     with _ts_lock:
@@ -993,7 +853,7 @@ def ts_merge(payload: dict):
 
     def sig(r):
         p = r["params"]
-        return (p["var"], p["stat"], p.get("plev"), p["experiment"],
+        return (p.get("dataset"), p["var"], p["stat"], p.get("plev"), p["experiment"],
                 p["member"], p["start"], p["end"])
 
     if any(sig(r) != sig(results[0]) for r in results[1:]):
@@ -1058,13 +918,13 @@ def ts_data(job_id: str, format: str = Query("csv", pattern="^(csv|nc)$")):
         raise HTTPException(404, "no data for this job")
     r = job["result"]
     p = r["params"]
-    cfg = VARIABLES[p["var"]]
-    src = _source_attrs(_get_dataset(p["experiment"], cfg["group"]))
-    attrs = _global_attrs(p["var"], src, {
-        "title": f"SPEAR-MED station time series: {p['var']}",
-        "selection": f"experiment {p['experiment']}, {_stat_text(p['stat'], p['member'])}"
-                     + (f", pressure level {int(p['plev'])} hPa" if cfg["plev"] else ""),
-        "statistic": _stat_text(p["stat"], p["member"]),
+    src = _src(p["dataset"])
+    cfg = src.variables[p["var"]]
+    attrs = _global_attrs(src, p["var"], src.download_attrs(p["experiment"], p["var"]), {
+        "title": f"{src.title} station time series: {p['var']}",
+        "selection": f"experiment {p['experiment']}, {src.stat_text(p['stat'], p['member'])}"
+                     + (f", pressure level {p['plev']} hPa" if cfg["plev"] else ""),
+        "statistic": src.stat_text(p["stat"], p["member"]),
         "stations": "; ".join(
             f"station {k + 1}: {_loc_str(r['plats'][k], r['plons'][k])}"
             for k in range(len(r["plats"]))
@@ -1109,7 +969,9 @@ def ts_data(job_id: str, format: str = Query("csv", pattern="^(csv|nc)$")):
 # Runs as a background job like the station time series (one chunk read
 # per month, x30 for ensemble statistics). Values stay in the store's
 # native units, as /api/download does.
-BOX_MAX_MONTHS = TS_MAX_MONTHS
+# No month cap by default (0): BOX_MAX_VALUES already bounds the size, so a
+# small box can span the whole scenario. Env-overridable.
+BOX_MAX_MONTHS = int(os.environ.get("BOX_MAX_MONTHS", "0"))
 BOX_MAX_VALUES = int(float(os.environ.get("BOX_MAX_VALUES", "20e6")))
 _box_jobs: dict = {}
 _box_lock = threading.Lock()
@@ -1179,8 +1041,9 @@ def _parse_box(raw) -> dict:
 def _run_box_job(job_id: str, p: dict):
     job = _box_jobs[job_id]
     try:
-        cfg = VARIABLES[p["var"]]
-        ds = _get_dataset(p["experiment"], cfg["group"])
+        src = _src(p["dataset"])
+        cfg = src.variables[p["var"]]
+        ds = src.open(p["experiment"], p["var"])
         lat_sl, lon_sls, wrap = _box_indices(ds, p["box"])
         months = p["months"]
         stat = p["stat"]
@@ -1192,26 +1055,17 @@ def _run_box_job(job_id: str, p: dict):
                 return
             batch = months[b0:b0 + TS_BATCH_MONTHS]
             da = ds[p["var"]].sel(time=slice(batch[0], batch[-1]))
-            attrs = dict(da.attrs)
-            if stat == "mean":
-                da = da.mean("member_id", keep_attrs=True)
-            elif stat == "spread":
-                da = da.std("member_id", ddof=1, keep_attrs=True)
-            elif stat == "anom":
-                da = da.sel(member_id=p["member"]) - da.mean("member_id")
-                da.attrs = attrs
-            else:
-                da = da.sel(member_id=p["member"])
+            da = src.reduce(da, stat, p["member"])
             if cfg["plev"]:
-                da = da.sel(plev=(p.get("plev") or 500) * 100.0, method="nearest")
+                da = src.level_select(da, p.get("plev"))
             da = da.isel(lat=lat_sl)
             if len(lon_sls) == 1:
                 da = da.isel(lon=lon_sls[0])
             else:
                 da = xr.concat([da.isel(lon=sl) for sl in lon_sls], dim="lon")
             da = _load_da(da)
-            if "member_id" in da.coords:
-                da = da.drop_vars("member_id")
+            if src.ensemble_dim and src.ensemble_dim in da.coords:
+                da = da.drop_vars(src.ensemble_dim)
             parts.append(da)
             job["progress"] = min(0.97, (b0 + len(batch)) / len(months))
         da = xr.concat(parts, dim="time") if len(parts) > 1 else parts[0]
@@ -1219,13 +1073,7 @@ def _run_box_job(job_id: str, p: dict):
         if wrap:
             lon = da.lon.values.astype(float)
             da = da.assign_coords(lon=("lon", ((lon + 180) % 360) - 180, dict(da.lon.attrs)))
-        long = da.attrs.get("long_name", p["var"])
-        if stat == "spread":
-            da.attrs["long_name"] = f"ensemble standard deviation (ddof=1, N=30) of {long}"
-        elif stat == "anom":
-            da.attrs["long_name"] = f"member {p['member']} minus ensemble mean of {long}"
-        elif stat == "mean":
-            da.attrs["long_name"] = f"ensemble mean (30 members) of {long}"
+        da.attrs["long_name"] = src.stat_long_name(stat, p["member"], da.attrs.get("long_name", p["var"]))
         # Store-specific encodings (zarr chunks/compressors) must not leak
         # into the NetCDF writer; keep only the calendar encoding of time.
         da.encoding = {}
@@ -1246,15 +1094,13 @@ def box_cells(
     experiment: str = Query("scenarioSSP5-85"),
     south: float = Query(...), north: float = Query(...),
     west: float = Query(...), east: float = Query(...),
+    dataset: str | None = Query(None),
 ):
     """How many grid cells a box covers on the variable's grid (cheap:
     coordinates only), so the UI can show the size before extracting."""
-    if var not in VARIABLES:
-        raise HTTPException(400, f"unknown variable {var!r}")
-    if experiment not in EXPERIMENTS:
-        raise HTTPException(400, f"unknown experiment {experiment!r}")
+    src = _src(dataset)
     box = _parse_box({"south": south, "north": north, "west": west, "east": east})
-    ds = _get_dataset(experiment, VARIABLES[var]["group"])
+    ds = _open(src, experiment, var)
     lat_sl, lon_sls, wrap = _box_indices(ds, box)
     lat_all = ds.lat.values.astype(float)
     lon_all = ds.lon.values.astype(float)
@@ -1275,29 +1121,28 @@ def box_cells(
 
 @app.post("/api/box/start")
 def box_start(payload: dict):
+    src = _src(payload.get("dataset"))
     var = payload.get("var")
-    if var not in VARIABLES:
-        raise HTTPException(400, f"unknown variable {var!r}")
     experiment = payload.get("experiment")
-    if experiment not in EXPERIMENTS:
-        raise HTTPException(400, f"unknown experiment {experiment!r}")
+    ds = _open(src, experiment, var)
     stat = payload.get("stat", "raw")
     if stat not in STATS:
         raise HTTPException(400, f"unknown stat {stat!r}")
     member = payload.get("member", "r1i1p1f1")
     if member == "ensmean" and stat == "raw":
         stat = "mean"
+    if not src.ensemble_dim:
+        stat, member = "raw", ""
     box = _parse_box(payload.get("box") or {})
     start, end = payload.get("start", ""), payload.get("end", "")
-    exp = EXPERIMENTS[experiment]
+    exp = src.experiments[experiment]
     if not (exp["start"] <= start <= end <= exp["end"]):
         raise HTTPException(400, f"range must lie within {exp['start']}..{exp['end']}")
     months = _ts_month_list(start, end)
-    if len(months) > BOX_MAX_MONTHS:
+    if BOX_MAX_MONTHS and len(months) > BOX_MAX_MONTHS:
         raise HTTPException(
             400, f"Range too long: max {BOX_MAX_MONTHS} months "
                  f"({BOX_MAX_MONTHS // 12} years) per extraction.")
-    ds = _get_dataset(experiment, VARIABLES[var]["group"])
     nlat, nlon = _box_shape(ds, box)
     n_values = len(months) * nlat * nlon
     if n_values > BOX_MAX_VALUES:
@@ -1307,9 +1152,9 @@ def box_start(payload: dict):
                  "Shrink the box or the time range.")
     job_id = uuid.uuid4().hex[:12]
     params = {
-        "var": var, "experiment": experiment, "member": member, "stat": stat,
-        "plev": payload.get("plev"), "box": box, "months": months,
-        "start": start, "end": end,
+        "dataset": src.id, "var": var, "experiment": experiment, "member": member, "stat": stat,
+        "plev": src.nearest_level(payload.get("plev")) if src.variables[var]["plev"] else None,
+        "box": box, "months": months, "start": start, "end": end,
     }
     with _box_lock:
         # subsets can be large; keep only the last few in memory
@@ -1346,18 +1191,18 @@ def box_data(job_id: str, format: str = Query("nc", pattern="^(nc|csv)$")):
     p = r["params"]
     da = r["da"]
     var = p["var"]
-    cfg = VARIABLES[var]
+    src = _src(p["dataset"])
     box = p["box"]
-    src = _source_attrs(_get_dataset(p["experiment"], cfg["group"]))
-    lev_txt = f", pressure level {int(round(float(da.plev.values) / 100))} hPa" if "plev" in da.coords else ""
-    lev_suffix = f"_{int(p['plev'] or 500)}hPa" if cfg["plev"] else ""
+    lev = src.level_hpa(da)
+    lev_txt = f", pressure level {lev} hPa" if lev is not None else ""
+    lev_suffix = f"_{lev}hPa" if lev is not None else ""
     lat = da.lat.values
     lon = da.lon.values
-    attrs = _global_attrs(var, src, {
-        "title": f"SPEAR-MED box subset: {var}",
-        "selection": f"experiment {p['experiment']}, {_stat_text(p['stat'], p['member'])}, "
+    attrs = _global_attrs(src, var, src.download_attrs(p["experiment"], var), {
+        "title": f"{src.title} box subset: {var}",
+        "selection": f"experiment {p['experiment']}, {src.stat_text(p['stat'], p['member'])}, "
                      f"months {p['start']} to {p['end']}{lev_txt}",
-        "statistic": _stat_text(p["stat"], p["member"]),
+        "statistic": src.stat_text(p["stat"], p["member"]),
         "period": f"{p['start']} to {p['end']} (monthly, {da.sizes['time']} steps)",
         "box_requested": f"lat {box['south']:.3f} to {box['north']:.3f}, "
                          f"lon {box['west']:.3f} to {box['east']:.3f} (degrees east, as drawn)",
@@ -1383,7 +1228,7 @@ def box_data(job_id: str, format: str = Query("nc", pattern="^(nc|csv)$")):
     for k, v in da.attrs.items():
         buf.write(f"# column {var} {k}: {_csv_attr(v)}\n")
     buf.write("# columns: time (YYYY-MM), lat (degrees_north), lon (degrees_east), "
-              f"{var} (native units)\n")
+              f"{var} ({da.attrs.get('units', 'units unknown')})\n")
     times = np.array([f"{t.year:04d}-{t.month:02d}" for t in da.time.values])
     vals = np.asarray(da.values, dtype=np.float64)
     nt, ni, nj = vals.shape
@@ -1406,10 +1251,11 @@ def _ts_summary(job_id: str) -> str:
         return ""
     r = job["result"]
     p = r["params"]
-    cfg = VARIABLES[p["var"]]
-    lev = f", {int(p['plev'])} hPa" if cfg["plev"] else ""
+    src = _src(p["dataset"])
+    cfg = src.variables[p["var"]]
+    lev = f", {p['plev']} hPa" if cfg["plev"] else ""
     lines = [
-        f"{p['var']} ({_stat_text(p['stat'], p['member'])}), "
+        f"{p['var']} ({src.stat_text(p['stat'], p['member'])}), "
         f"experiment {p['experiment']}{lev}, {p['start']} to {p['end']} "
         f"({len(r['months'])} monthly values), units {r['units']}"
     ]
@@ -1435,10 +1281,10 @@ def _ts_summary(job_id: str) -> str:
 # ---------------------------------------------------------------- chat
 SYSTEM_PROMPT = (
     "You are SPEAK (the SPEAR Knowledge Assistant), embedded in an interactive "
-    "map viewer for the NOAA GFDL SPEAR-MED large ensemble (30 members, "
-    "experiments: historical 1921-2014 and SSP5-8.5 2015-2100, monthly means, "
-    "0.5°x0.625° atmosphere). Refer to yourself as SPEAK. Answer questions "
-    "about the data currently on screen, the SPEAR model, and its variables. "
+    "map viewer for gridded monthly climate datasets; the DATASET section "
+    "below describes the one currently on screen. Refer to yourself as SPEAK. "
+    "Answer questions about the data currently on screen, the model or "
+    "reanalysis it comes from, and its variables. "
     "Use the VIEW CONTEXT section for on-screen values (they are statistics "
     "computed from the displayed field, in the stated display units) and the "
     "DOCUMENTATION section for background. If an EXTRACTED TIME SERIES "
@@ -1447,19 +1293,17 @@ SYSTEM_PROMPT = (
     "decade) — use it for trend, seasonality and variability questions about "
     "those stations. Be concise and quantitative. "
     "If something is not in the context or documentation, say so rather than "
-    "guessing. These are monthly-mean climate model fields, not observations "
-    "or forecasts. Coordinates use hemisphere letters: °W longitudes are in "
+    "guessing. These are monthly-mean gridded fields (model output or "
+    "reanalysis, as the DATASET section says), not station observations or "
+    "forecasts. Coordinates use hemisphere letters: °W longitudes are in "
     "the western hemisphere (the Americas side), °E in the eastern hemisphere "
     "(Europe/Africa/Asia side) — take care to name regions accordingly. The "
     "user-clicked point and the statistics' min/max locations are DIFFERENT "
     "places; never merge or interchange them, and when referring to the "
     "clicked point always restate its own coordinates. "
-    "If the user asks where to find or download the SPEAR data "
-    "itself, point them to the public AWS S3 bucket: "
-    "https://noaa-gfdl-spear-large-ensembles-pds.s3.amazonaws.com/index.html"
-    "#SPEAR/GFDL-LARGE-ENSEMBLES/CMIP/NOAA-GFDL/GFDL-SPEAR-MED/ "
-    "(and note this viewer's Download buttons export the currently displayed "
-    "subset as NetCDF or CSV). "
+    "If the user asks where to find or download the data itself, use the "
+    "DATASET section (and note this viewer's Download buttons export the "
+    "currently displayed subset as NetCDF or CSV). "
     "When you provide an analysis or interpretation (trends, comparisons, "
     "physical explanations, significance judgements), end the response with a "
     "single footer line in this exact style: "
@@ -1479,12 +1323,26 @@ SYSTEM_PROMPT = (
     "When you mention a publication, include its DOI as a markdown link "
     "(https://doi.org/...) if — and only if — you know the DOI with "
     "certainty from the documentation or established knowledge; never guess "
-    "or fabricate a DOI, cite title and authors alone when unsure. The core "
-    "SPEAR reference is Delworth et al. 2020, 'SPEAR: The Next Generation "
-    "GFDL Modeling System for Seasonal to Multidecadal Prediction and "
-    "Projection', J. Adv. Model. Earth Syst., "
-    "[doi:10.1029/2019MS001895](https://doi.org/10.1029/2019MS001895)."
+    "or fabricate a DOI, cite title and authors alone when unsure."
 )
+
+
+def _dataset_notes(src) -> str:
+    """The DATASET section of the chat system prompt."""
+    exps = "; ".join(f"{k} {v['start']} to {v['end']}" for k, v in src.experiments.items())
+    lines = [f"Dataset id {src.id}: {src.title}" + (f" — {src.subtitle}" if src.subtitle else "")]
+    if src.description:
+        lines.append(src.description)
+    lines.append(f"Experiments/periods: {exps}. Grid: {src.grid_text}. Calendar: {src.calendar}.")
+    lines.append(f"Ensemble: {len(src.members)} members" if src.ensemble_dim
+                 else "Ensemble: none (single realization; no member/mean/spread statistics)")
+    lines.append("Variables: " + ", ".join(
+        f"{k} ({v['long']}, displayed in {v['units']})" for k, v in src.variables.items()))
+    if src.link:
+        lines.append(f"Data access: {src.link}")
+    if src.chat_notes:
+        lines.append(src.chat_notes)
+    return "\n".join(lines)
 
 
 def _fmt(x):
@@ -1526,14 +1384,16 @@ def _stats_text(vals, lat, lon, units, name):
     )
 
 
-def _display_field(varname, experiment, member, time, plev, stat="raw"):
-    cfg = VARIABLES[varname]
+def _display_field(src, varname, experiment, member, time, plev, stat="raw"):
+    cfg = src.variables[varname]
     if member == "ensmean" and stat == "raw":
         stat = "mean"
-    ds = _get_dataset(experiment, cfg["group"])
-    da = _select_stat(ds, varname, member, time, stat)
+    if not src.ensemble_dim:
+        stat, member = "raw", ""
+    ds = _open(src, experiment, varname)
+    da = _select_stat(src, ds, varname, member, time, stat)
     if cfg["plev"]:
-        da = da.sel(plev=(plev or 500) * 100.0, method="nearest")
+        da = src.level_select(da, plev)
     offset = 0.0 if stat in ("spread", "anom") else cfg["offset"]
     vals = _load_values(da).astype(np.float64) * cfg["scale"] + offset
     return vals, ds.lat.values.astype(float), ds.lon.values.astype(float)
@@ -1546,21 +1406,22 @@ def _point_value(vals, lat, lon, plat, plon):
     return float(v) if np.isfinite(v) else None
 
 
-def _build_view_context(view):
-    var = view.get("var") if view.get("var") in VARIABLES else "pr"
-    cfg = VARIABLES[var]
-    experiment = view.get("experiment", "scenarioSSP5-85")
+def _build_view_context(src, view):
+    var = view.get("var") if view.get("var") in src.variables else next(iter(src.variables))
+    cfg = src.variables[var]
+    first_exp = next(iter(src.experiments))
+    experiment = view.get("experiment") if view.get("experiment") in src.experiments else first_exp
     member = view.get("member", "r1i1p1f1")
     stat = view.get("stat", "raw")
     if stat not in STATS:
         stat = "raw"
-    time = view.get("time", "2030-01")
+    time = view.get("time") or src.experiments[experiment]["start"]
     plev = view.get("plev")
     lev_txt = f" at {plev} hPa" if cfg["plev"] and plev else ""
-    mem_txt = _stat_text("mean" if member == "ensmean" and stat == "raw" else stat, member)
+    mem_txt = src.stat_text("mean" if member == "ensmean" and stat == "raw" else stat, member)
     lines = [f"Variable: {var} — {cfg['long']} (displayed in {cfg['units']})"]
     try:
-        va, lat, lon = _display_field(var, experiment, member, time, plev, stat)
+        va, lat, lon = _display_field(src, var, experiment, member, time, plev, stat)
     except Exception as e:
         return f"(view context unavailable: {e})"
     vb = None
@@ -1572,10 +1433,10 @@ def _build_view_context(view):
             sb = "raw"
         tb = view.get("time_b", time)
         try:
-            vb, _, _ = _display_field(var, eb, mb, tb, plev, sb)
+            vb, _, _ = _display_field(src, var, eb, mb, tb, plev, sb)
         except Exception as e:
             return f"(view context unavailable for B: {e})"
-        mb_txt = _stat_text("mean" if mb == "ensmean" and sb == "raw" else sb, mb)
+        mb_txt = src.stat_text("mean" if mb == "ensmean" and sb == "raw" else sb, mb)
         lines.append(
             f"Compare mode: A = ({experiment}, {mem_txt}, {time}{lev_txt}) "
             f"minus B = ({eb}, {mb_txt}, {tb}{lev_txt})"
@@ -1695,11 +1556,12 @@ def _anthropic_call(model, system, messages, key):
 
 # Per-model quotas are independent, so on quota/transient errors we walk
 # down this chain (older Gemini flash models, then Claude Haiku as a
-# cross-vendor last resort).
+# cross-vendor last resort). Google retires older models (404 "no longer
+# available to new users"), so keep this list to currently served names.
 FALLBACK_CHAIN = [
     ("gemini", None),  # None -> LLM_MODEL
+    ("gemini", "gemini-3.6-flash"),
     ("gemini", "gemini-3.5-flash"),
-    ("gemini", "gemini-2.5-flash"),
     ("anthropic", "claude-haiku-4-5-20251001"),
 ]
 
@@ -1734,8 +1596,9 @@ def _call_llm(system, messages):
             return _anthropic_call(model, system, messages, key)
         except requests.HTTPError as e:
             last_err = e
-            # quota exhausted or transient server error -> try the next model
-            if e.response.status_code in (429, 500, 502, 503):
+            # quota exhausted, transient server error, or model retired
+            # (404) -> try the next model
+            if e.response.status_code in (404, 429, 500, 502, 503):
                 continue
             raise
         except requests.RequestException as e:
@@ -1816,8 +1679,10 @@ def chat(payload: dict, request: Request):
     if not messages:
         raise HTTPException(400, "no messages")
     view = payload.get("view") or {}
-    context = _build_view_context(view)
-    system = SYSTEM_PROMPT + "\n\n=== VIEW CONTEXT (current screen) ===\n" + context
+    src = _src(view.get("dataset"))
+    context = _build_view_context(src, view)
+    system = (SYSTEM_PROMPT + "\n\n=== DATASET ===\n" + _dataset_notes(src)
+              + "\n\n=== VIEW CONTEXT (current screen) ===\n" + context)
     ts_ids = view.get("ts_jobs")
     if not isinstance(ts_ids, list):
         ts_ids = [view.get("ts_job")] if isinstance(view.get("ts_job"), str) else []

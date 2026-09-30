@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>SPEAR-MED Viewer</title>
+<title>Climate Data Viewer</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-<link rel="stylesheet" href="style.css?v=9" />
+<link rel="stylesheet" href="style.css?v=10" />
 </head>
 <body>
 <div id="map"></div>
@@ -37,10 +37,8 @@
 <button type="button" id="rotate-btn" class="globe-btn rotate-btn" hidden title="Slowly spin the globe">Start Rotation</button>
 <div id="globe-note" class="globe-note" hidden>Ctrl+click the globe to place or remove a virtual station</div>
 
-<a class="data-access"
-   href="https://noaa-gfdl-spear-large-ensembles-pds.s3.amazonaws.com/index.html#SPEAR/GFDL-LARGE-ENSEMBLES/CMIP/NOAA-GFDL/GFDL-SPEAR-MED/"
-   target="_blank" rel="noopener"
-   title="Browse the public NOAA GFDL SPEAR large-ensemble S3 bucket">Access SPEAR Data</a>
+<a class="data-access" id="data-access" href="#" target="_blank" rel="noopener" hidden
+   title="Browse the source data">Access Data</a>
 
 <div class="play-bar">
   <button type="button" id="play-btn" class="play-btn" title="Animate 12 months from the selected date">&#9654; Play year</button>
@@ -86,9 +84,9 @@
     <div class="box-cells" id="box-cells"></div>
     <div class="ts-range box-range">
       <span>Months</span>
-      <input type="month" id="box-start" />
+      <input type="text" inputmode="numeric" placeholder="YYYY-MM" maxlength="7" id="box-start" />
       <span>to</span>
-      <input type="month" id="box-end" />
+      <input type="text" inputmode="numeric" placeholder="YYYY-MM" maxlength="7" id="box-end" />
     </div>
     <div class="box-note" id="box-note"></div>
     <div class="ts-card-actions box-actions">
@@ -114,7 +112,7 @@
     </span>
   </div>
   <div class="chat-messages" id="chat-messages">
-    <div class="chat-msg bot">Hi! Ask me about the data on screen, comparisons, the SPEAR model, or its variables. I can see the current selection, its statistics, and any virtual stations placed.</div>
+    <div class="chat-msg bot">Hi! Ask me about the data on screen, comparisons, the model or reanalysis behind it, or its variables. I can see the current selection, its statistics, and any virtual stations placed.</div>
   </div>
   <form class="chat-input" id="chat-form">
     <textarea id="chat-text" rows="2" placeholder="Ask about what you see&hellip;"></textarea>
@@ -123,11 +121,17 @@
 </div>
 
 <div class="panel" id="panel">
-  <div class="panel-title"><a class="brand-link" href="https://www.gfdl.noaa.gov/spear/" target="_blank" rel="noopener" title="Open the NOAA GFDL SPEAR homepage">SPEAR-MED</a> <span class="sub">GFDL large ensemble · v31</span></div>
+  <div class="panel-title"><a class="brand-link" id="brand-link" href="#" target="_blank" rel="noopener"></a> <span class="sub" id="brand-sub"></span></div>
 
-  <div class="row row-col">
-    <span class="group-hint" title="GFDL AM4.0, 0.5&deg; Resolution">Atmospheric (Monthly)</span>
-    <div class="seg" id="var-seg-sfc"></div>
+  <div class="row row-col" id="dataset-row" hidden>
+    <span>Dataset</span>
+    <div class="seg" id="dataset-seg"></div>
+  </div>
+
+  <!-- variable groups are built from /api/meta (one block per realm/group) -->
+  <div id="var-groups"></div>
+  <!-- the pressure-level block is moved into the group that has level variables -->
+  <div id="plev-holder" hidden>
     <span class="subgroup-title">Pressure levels</span>
     <div class="row plev-inline">
       <span>Level</span>
@@ -140,21 +144,16 @@
   </div>
 
   <div class="row row-col">
-    <span class="group-hint" title="GFDL MOM6, 1.0&deg; Resolution">Ocean (Monthly)</span>
-    <div class="seg" id="var-seg-ocean"></div>
-  </div>
-
-  <div class="row row-col">
     <span>Units</span>
     <div class="seg" id="unit-seg"></div>
   </div>
 
-  <div class="row row-col">
-    <span>Experimental Scenario</span>
+  <div class="row row-col" id="exp-row">
+    <span>Experiment</span>
     <div class="seg" id="exp-seg"></div>
   </div>
 
-  <div class="row">
+  <div class="row" id="member-row">
     <span>Member</span>
     <div class="dropdown">
       <button type="button" class="dd-btn" id="member-btn"></button>
@@ -162,7 +161,7 @@
     </div>
   </div>
 
-  <div class="row row-col">
+  <div class="row row-col" id="stat-row">
     <span>Statistic</span>
     <div class="seg" id="stat-seg"></div>
   </div>
@@ -184,12 +183,12 @@
   <div id="compare-block" hidden>
     <div class="compare-title">Selection B</div>
 
-    <div class="row row-col">
-      <span>Experimental Scenario</span>
+    <div class="row row-col" id="exp-row-b">
+      <span>Experiment</span>
       <div class="seg" id="exp-seg-b"></div>
     </div>
 
-    <div class="row">
+    <div class="row" id="member-row-b">
       <span>Member</span>
       <div class="dropdown">
         <button type="button" class="dd-btn" id="member-btn-b"></button>
@@ -197,7 +196,7 @@
       </div>
     </div>
 
-    <div class="row row-col">
+    <div class="row row-col" id="stat-row-b">
       <span>Statistic</span>
       <div class="seg" id="stat-seg-b"></div>
     </div>
@@ -217,7 +216,7 @@
     <input type="range" id="opacity" min="0" max="100" value="100" />
   </label>
 
-  <label class="row">
+  <label class="row" id="wind-row">
     <span>Wind animation</span>
     <input type="checkbox" id="particles-toggle" checked />
   </label>
@@ -284,6 +283,6 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="config.js"></script>
-<script src="app.js?v=32"></script>
+<script src="app.js?v=33"></script>
 </body>
 </html>

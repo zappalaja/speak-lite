@@ -1,0 +1,16 @@
+{
+  "output_root": "/home/jlz/virtualizarr",
+  "catalogs": [
+    {
+      "id": "ecda",
+      "title": "ECDA reanalysis",
+      "description": "SPEAR c96 ECDA J11 monthly means",
+      "roots": ["/data/4/zappalaj/ecda_reanalysis/mo"],
+      "pattern": null,
+      "var_from": "filename",
+      "vars": null,
+      "parser": "auto",
+      "keep_going": false
+    }
+  ]
+}
