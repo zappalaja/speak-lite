@@ -12,6 +12,14 @@
  */
 "use strict";
 
+// The app may be served under a path prefix by a reverse proxy
+// (https://host/ahd-dev/ -> the server's /). API calls are made relative
+// to the page's own directory so they go through the same prefix.
+const API = (() => {
+  const p = location.pathname;
+  return (p.endsWith("/") ? p.slice(0, -1) : p.replace(/\/[^/]*$/, "")).replace(/\/+$/, "");
+})();
+
 // ---------------------------------------------------------------- colormaps
 // Windy-style multi-hue ramps. stops: value (display units), rgb, alpha.
 const VAR_CONFIG = {
@@ -1577,7 +1585,7 @@ async function fetchJSON(url) {
 function fetchField(sel) {
   const p = { dataset: state.dataset, var: state.var, ...sel };
   if (meta.variables[state.var].plev) p.plev = state.plev;
-  return fetchJSON(`/api/field?${new URLSearchParams(p)}`);
+  return fetchJSON(`${API}/api/field?${new URLSearchParams(p)}`);
 }
 
 // Full-screen overlay for heavy loads (pressure-level ensemble means).
@@ -1749,7 +1757,7 @@ async function loadField() {
       if (meta.variables[state.var].plev) windParams.plev = state.plev;
       const [f, w] = await Promise.all([
         fetchField(selA),
-        hasWind() ? fetchJSON(`/api/wind?${new URLSearchParams(windParams)}`) : Promise.resolve(null),
+        hasWind() ? fetchJSON(`${API}/api/wind?${new URLSearchParams(windParams)}`) : Promise.resolve(null),
       ]);
       if (seq !== loadSeq) return;
       f._grid = toFloat32(f.values, f.nlat, f.nlon);
@@ -2164,7 +2172,7 @@ function buildPlevDropdown() {
 }
 
 async function init() {
-  META_ALL = await fetchJSON("/api/meta");
+  META_ALL = await fetchJSON(`${API}/api/meta`);
   const wanted = (SAVED && SAVED.dataset) || META_ALL.default;
   const dsMeta =
     META_ALL.datasets.find((d) => d.id === wanted && !d.error) ||
@@ -2348,7 +2356,7 @@ async function init() {
       params.set("time_b", el("month-input-b").value);
     }
     const a = document.createElement("a");
-    a.href = `/api/download?${params}`;
+    a.href = `${API}/api/download?${params}`;
     a.download = "";
     document.body.appendChild(a);
     a.click();
@@ -2508,7 +2516,7 @@ function tsSectionHTML(idx) {
     `<button type="button" class="popup-ts-btn" onclick="tsExtractFor(${idx})">` +
     `Extract plot &mdash; ${who}</button>` +
     (t.ready && t.job
-      ? `<img class="popup-ts-thumb" src="/api/timeseries/plot/${t.job}.png" ` +
+      ? `<img class="popup-ts-thumb" src="${API}/api/timeseries/plot/${t.job}.png" ` +
         `onclick="tsSpawnCard('${t.job}')" title="Click to enlarge" alt="time series preview" />`
       : "") +
     (t.pin
@@ -2536,7 +2544,7 @@ function tsSpawnCard(job) {
   div.innerHTML =
     `<div class="ts-float-head"><span>Station time series</span>` +
     `<button type="button" class="ts-float-close" title="Close">&#10005;</button></div>` +
-    `<img src="/api/timeseries/plot/${job}.png" alt="time series plot" />` +
+    `<img src="${API}/api/timeseries/plot/${job}.png" alt="time series plot" />` +
     `<div class="ts-card-actions">` +
     `<button type="button" data-fmt="png">&#8595; PNG</button>` +
     `<button type="button" data-fmt="csv">&#8595; CSV</button>` +
@@ -2553,13 +2561,13 @@ function tsSpawnCard(job) {
       const fmt = btn.dataset.fmt;
       if (fmt === "png") {
         const a = document.createElement("a");
-        a.href = `/api/timeseries/plot/${job}.png`;
+        a.href = `${API}/api/timeseries/plot/${job}.png`;
         a.download = `spear_timeseries_${job}.png`;
         document.body.appendChild(a);
         a.click();
         a.remove();
       } else {
-        window.open(`/api/timeseries/data/${job}?format=${fmt}`, "_blank");
+        window.open(`${API}/api/timeseries/data/${job}?format=${fmt}`, "_blank");
       }
     });
   });
@@ -2596,7 +2604,7 @@ async function restoreTsJobs(saved) {
   const valid = {};
   await Promise.all([...ids].map(async (j) => {
     try {
-      const s = await fetchJSON(`/api/timeseries/status/${j}`);
+      const s = await fetchJSON(`${API}/api/timeseries/status/${j}`);
       if (s.done && !s.error) valid[j] = true;
     } catch { /* job gone (server restart/eviction) — drop it */ }
   }));
@@ -2831,7 +2839,7 @@ async function startPlayback(resume) {
           time: mth,
         };
         if (isPlev) wp.plev = state.plev;
-        const w = await fetchJSON(`/api/wind?${new URLSearchParams(wp)}`);
+        const w = await fetchJSON(`${API}/api/wind?${new URLSearchParams(wp)}`);
         w._u = toFloat32(w.u, w.nlat, w.nlon);
         w._v = toFloat32(w.v, w.nlat, w.nlon);
         w.u = w.v = null;
@@ -3787,7 +3795,7 @@ async function mergePlots() {
   const jobs = pinnedPoints.filter((p) => p.tsReady && p.tsJob).map((p) => p.tsJob);
   if (jobs.length < 2) return;
   try {
-    const r = await fetchJSON2("/api/timeseries/merge", { jobs });
+    const r = await fetchJSON2(`${API}/api/timeseries/merge`, { jobs });
     tsDoneJobs.unshift(r.job);
     tsDoneJobs = tsDoneJobs.slice(0, 8);
     tsSpawnCard(r.job);
@@ -3820,7 +3828,7 @@ async function tsCancel() {
   setStatus("Time series extraction cancelled");
   if (job) {
     try {
-      await fetch(`/api/timeseries/cancel/${job}`, { method: "POST" });
+      await fetch(`${API}/api/timeseries/cancel/${job}`, { method: "POST" });
     } catch { /* server may already be done; nothing to do */ }
   }
 }
@@ -3844,7 +3852,7 @@ function tsMonthCount(start, end) {
 
 async function tsPoll(job) {
   try {
-    const s = await fetchJSON(`/api/timeseries/status/${job}`);
+    const s = await fetchJSON(`${API}/api/timeseries/status/${job}`);
     if (!currentExtraction || currentExtraction.job !== job) return; // superseded/cancelled
     if (s.error) {
       tsHideProgress();
@@ -3909,7 +3917,7 @@ async function tsExtractFor(idx) {
   };
   if (meta.variables[state.var].plev) payload.plev = state.plev;
   try {
-    const r = await fetchJSON2("/api/timeseries/start", payload);
+    const r = await fetchJSON2(`${API}/api/timeseries/start`, payload);
     currentExtraction = { job: r.job, pin: t.pin || null };
     tsShowProgress();
     tsPoll(r.job);
@@ -4015,7 +4023,7 @@ async function sendChat(text) {
   typing.innerHTML =
     '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
   try {
-    const resp = await fetch("/api/chat", {
+    const resp = await fetch(`${API}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages: chat.messages.slice(-12), view: viewSnapshot() }),
@@ -4537,7 +4545,7 @@ function boxFetchCells() {
       south: b.south, north: b.north, west: b.west, east: b.east,
     });
     try {
-      const r = await fetchJSON(`/api/box/cells?${params}`);
+      const r = await fetchJSON(`${API}/api/box/cells?${params}`);
       if (box.bounds !== b) return; // box changed meanwhile
       box.cells = r;
       boxUpdateSize();
@@ -4683,7 +4691,7 @@ function boxPayload() {
 
 function boxOpenDownload(job, fmt) {
   const a = document.createElement("a");
-  a.href = `/api/box/data/${job}?format=${fmt}`;
+  a.href = `${API}/api/box/data/${job}?format=${fmt}`;
   a.download = "";
   document.body.appendChild(a);
   a.click();
@@ -4703,7 +4711,7 @@ async function boxDownload(fmt) {
     return;
   }
   try {
-    const r = await fetchJSON2("/api/box/start", payload);
+    const r = await fetchJSON2(`${API}/api/box/start`, payload);
     box.pending = { job: r.job, fmt, sig };
     boxUpdateSize();
     boxShowProgress(r);
@@ -4733,7 +4741,7 @@ function boxHideProgress() {
 
 async function boxPoll(job) {
   try {
-    const s = await fetchJSON(`/api/box/status/${job}`);
+    const s = await fetchJSON(`${API}/api/box/status/${job}`);
     if (!box.pending || box.pending.job !== job) return; // cancelled / superseded
     if (s.error) {
       box.pending = null;
@@ -4772,7 +4780,7 @@ async function boxCancel() {
   setStatus("Box extraction cancelled");
   if (job) {
     try {
-      await fetch(`/api/box/cancel/${job}`, { method: "POST" });
+      await fetch(`${API}/api/box/cancel/${job}`, { method: "POST" });
     } catch { /* server may already be done */ }
   }
 }

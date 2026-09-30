@@ -391,8 +391,11 @@ def open_virtual(desc: dict, parser_choice: str):
     """Concatenate all files of a variable into one virtual dataset."""
     import xarray as xr
     from virtualizarr import open_virtual_dataset
-    from virtualizarr.registry import ObjectStoreRegistry
     from obstore.store import LocalStore
+    try:  # VirtualiZarr >= 2.7 moved the registry to obspec_utils
+        from obspec_utils.registry import ObjectStoreRegistry
+    except ImportError:
+        from virtualizarr.registry import ObjectStoreRegistry
 
     registry = ObjectStoreRegistry({"file://": LocalStore()})
     var = desc["var"]

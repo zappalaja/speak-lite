@@ -190,6 +190,11 @@ VIEWER_HOST=127.0.0.1 VIEWER_PORT=8601 python windy_viewer/server.py
 ssh -N -L 8601:localhost:8601 hpc-node      # then open http://localhost:8601
 ```
 
+The viewer can also sit behind a reverse proxy under a path prefix
+(e.g. `https://host/ahd-dev/` → the server's `/`): the frontend derives the
+prefix from the page URL and makes every API call relative to it, so no
+server-side configuration is needed as long as the proxy strips the prefix.
+
 Basemap tiles are fetched by the *browser*, so they work over the tunnel
 even if the HPC node has no internet. ArrayLake datasets and SPEAK (LLM
 APIs, the RAG service) need outbound HTTPS from the node; without it leave

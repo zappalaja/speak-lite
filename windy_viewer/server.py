@@ -33,8 +33,20 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).resolve().parent
-CACHE_DIR = BASE_DIR / "data" / "cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Writable scratch (field cache, RAG log): VIEWER_DATA_DIR, else
+# windy_viewer/data in the checkout. If that can't be created (read-only
+# or full home directory on a shared system), fall back to a temp dir so
+# the viewer still starts — the cache is only an accelerator.
+DATA_DIR = Path(os.environ.get("VIEWER_DATA_DIR") or BASE_DIR / "data")
+try:
+    (DATA_DIR / "cache").mkdir(parents=True, exist_ok=True)
+except OSError as _e:
+    _fallback = Path(tempfile.gettempdir()) / f"windy-viewer-{os.getuid()}"
+    print(f"[viewer] cannot use {DATA_DIR} ({_e.strerror}); using {_fallback} — set VIEWER_DATA_DIR")
+    DATA_DIR = _fallback
+    (DATA_DIR / "cache").mkdir(parents=True, exist_ok=True)
+CACHE_DIR = DATA_DIR / "cache"
 
 # Optional response cache. Every selection change always maps to a fresh
 # ArrayLake query for exactly that slice; the cache only skips re-querying
@@ -164,7 +176,7 @@ def _ensure_rag_service():
     env.setdefault("CHROMA_COLLECTION", "nougat_merged")
     env.setdefault("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     env.setdefault("CODE_SNIPPETS_DIR", str(RAG_DIR / "code_snippets"))
-    log = open(BASE_DIR / "data" / "rag.log", "ab")
+    log = open(DATA_DIR / "rag.log", "ab")
     _rag_proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "rag_service:app",
          "--host", "127.0.0.1", "--port", RAG_API_URL.rsplit(":", 1)[-1]],
