@@ -1,0 +1,19 @@
+# conda env for the viewer + catalog tool
+#   conda env create -f environment.yml
+#   conda activate windy
+# Everything Python comes from requirements.txt via pip; conda only
+# provides the interpreter and the compiled netCDF/HDF5 stack.
+name: windy
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - netcdf4
+  - hdf5
+  - h5py
+  - pip:
+      # CPU-only torch (for SPEAK's RAG service); the default index would pull the multi-GB CUDA build
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch
+      - -r requirements.txt
