@@ -122,6 +122,11 @@ html, body {
   padding: 4px 6px;
   font: inherit;
   font-size: 14px;
+  /* explicit size: browsers without a month picker (Firefox) fall back to
+     a wide text box that would push the > button out of the panel */
+  width: 122px;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 /* segmented button groups (in-page controls — native <select> popups
@@ -279,6 +284,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
 }
 .month-controls button {
   background: #242423;
@@ -294,7 +300,9 @@ html, body {
 .month-controls button:hover { background: #2e2e2c; }
 
 .row input[type="range"] {
-  flex: 1;
+  flex: 1 1 60px;
+  min-width: 0;
+  width: 100px; /* Firefox's default range width would overflow the row */
   accent-color: var(--accent);
 }
 
@@ -1378,3 +1386,34 @@ html, body {
   cursor: pointer;
 }
 .chat-input button:disabled { opacity: 0.5; cursor: default; }
+
+/* (kept last so these override the rules above) Browsers without CSS zoom (Firefox before 126, incl. ESR 115): scale
+   the same chrome with a transform instead. Layout happens at full size
+   and is scaled visually, so the fixed offsets that assumed zoomed pixels
+   are multiplied by the scale here. */
+@supports not (zoom: 1) {
+  .panel, .grat-box, .globe-btn, .globe-note, .data-access, .ask-bubble,
+  .merge-plots, .clear-pins, .clear-box, .load-box {
+    zoom: 1;
+    transform: scale(var(--ui-scale));
+  }
+  .panel, .grat-box, .globe-btn, .globe-note { transform-origin: top left; }
+  .ask-bubble { transform-origin: top right; }
+  .data-access, .clear-box { transform-origin: bottom left; }
+  .merge-plots, .clear-pins { transform-origin: bottom right; }
+  .load-box { transform-origin: center; }
+  .play-bar { transform: translateX(-50%) scale(var(--ui-scale)); transform-origin: bottom center; }
+  .globe-hint { transform: translateX(-50%) scale(var(--ui-scale)); transform-origin: bottom center; }
+  .panel { top: calc(12px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
+  .globe-btn { top: calc(12px * var(--ui-scale)); left: calc(334px * var(--ui-scale)); }
+  .globe-btn.box-btn { top: calc(64px * var(--ui-scale)); }
+  .grat-box { top: calc(118px * var(--ui-scale)); left: calc(334px * var(--ui-scale)); }
+  .rotate-btn { top: calc(202px * var(--ui-scale)); }
+  .globe-note { top: calc(256px * var(--ui-scale)); left: calc(334px * var(--ui-scale)); }
+  .data-access { bottom: calc(24px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
+  .clear-box { bottom: calc(92px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
+  .ask-bubble { top: calc(16px * var(--ui-scale)); right: calc(16px * var(--ui-scale)); }
+  .merge-plots { bottom: calc(76px * var(--ui-scale)); right: calc(14px * var(--ui-scale)); }
+  .clear-pins { bottom: calc(24px * var(--ui-scale)); right: calc(14px * var(--ui-scale)); }
+  .play-bar { bottom: calc(20px * var(--ui-scale)); }
+}
