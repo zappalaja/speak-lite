@@ -425,10 +425,10 @@ class CatalogSource(Source):
         import icechunk as ic
         with self._lock:
             if self._repo is None:
-                prefix = self.catalog["virtual_chunk_container"]
+                prefixes = self.catalog.get("virtual_chunk_containers") or [self.catalog["virtual_chunk_container"]]
                 self._repo = ic.Repository.open(
                     ic.local_filesystem_storage(str(self.path / "store")),
-                    authorize_virtual_chunk_access={prefix: ic.Credentials.LocalFileSystemAccess()},
+                    authorize_virtual_chunk_access={p: ic.Credentials.LocalFileSystemAccess() for p in prefixes},
                 )
             return self._repo.readonly_session("main").store
 

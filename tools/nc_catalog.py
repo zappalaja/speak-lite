@@ -419,23 +419,46 @@ def open_virtual(desc: dict, parser_choice: str):
     return vds
 
 
-def _container_prefix(roots: list[Path]) -> str:
-    common = Path(os.path.commonpath([str(r.resolve()) for r in roots]))
-    return f"file://{common}/"
+def _containers(descs: list[dict]) -> list[str]:
+    """Icechunk resolves virtual chunks through 'containers' keyed by URL
+    prefix. One container per top-level directory the (symlink-resolved)
+    files really live in, e.g. file:///data/4/... and file:///archive/...,
+    so a data tree that symlinks into the archive still resolves."""
+    by_top: dict[str, list[str]] = {}
+    for d in descs:
+        for f in d["files"]:
+            real = f["path"].resolve()
+            top = "/" + real.parts[1] if len(real.parts) > 1 else "/"
+            by_top.setdefault(top, []).append(str(real.parent))
+    return sorted(f"file://{os.path.commonpath(v)}/" for v in by_top.values())
 
 
 def write_store(out: Path, roots: list[Path], descs: list[dict], parser_choice: str, append: bool):
+    """Returns the list of virtual chunk container prefixes the store uses."""
     import icechunk as ic
 
-    prefix = _container_prefix(roots)
-    container_path = prefix[len("file://"):]
-    creds = {prefix: ic.Credentials.LocalFileSystemAccess()}
+    prefixes = _containers(descs)
     storage = ic.local_filesystem_storage(str(out / "store"))
-    if append and (out / "store").exists():
+    cat_path = out / "catalog.json"
+    if append and (out / "store").exists() and cat_path.exists():
+        old_cat = json.loads(cat_path.read_text())
+        old = old_cat.get("virtual_chunk_containers") or [old_cat["virtual_chunk_container"]]
+        prefixes = sorted(set(old) | set(prefixes))
+        creds = {p: ic.Credentials.LocalFileSystemAccess() for p in prefixes}
         repo = ic.Repository.open(storage, authorize_virtual_chunk_access=creds)
+        missing = [p for p in prefixes if p not in old]
+        if missing:  # files now live somewhere the store wasn't told about
+            config = repo.config
+            for p in missing:
+                config.set_virtual_chunk_container(ic.VirtualChunkContainer(p, ic.local_filesystem_store(p[len("file://"):])))
+            repo = ic.Repository.open(storage, config=config, authorize_virtual_chunk_access=creds)
+            repo.save_config()
+            log.info("registered new file location(s): %s", ", ".join(missing))
     else:
+        creds = {p: ic.Credentials.LocalFileSystemAccess() for p in prefixes}
         config = ic.RepositoryConfig.default()
-        config.set_virtual_chunk_container(ic.VirtualChunkContainer(prefix, ic.local_filesystem_store(container_path)))
+        for p in prefixes:
+            config.set_virtual_chunk_container(ic.VirtualChunkContainer(p, ic.local_filesystem_store(p[len("file://"):])))
         repo = ic.Repository.create(storage, config=config, authorize_virtual_chunk_access=creds)
         append = False
     session = repo.writable_session("main")
@@ -448,23 +471,30 @@ def write_store(out: Path, roots: list[Path], descs: list[dict], parser_choice: 
             if not new:
                 log.info("%s: up to date (%d months)", var, len(existing[var]))
                 continue
-            sub = dict(d, files=new)
-            vds = open_virtual(sub, parser_choice)
-            log.info("%s: appending %d month(s)", var, vds.sizes["time"])
-            vds.vz.to_icechunk(session.store, group=var, append_dim="time")
-            changed = True
-        else:
-            vds = open_virtual(d, parser_choice)
-            log.info("%s: writing %d month(s), %d chunk refs, %s", var, vds.sizes["time"],
-                     vds.vz.nrefs(), ", ".join(f"{k}={v}" for k, v in vds.sizes.items()))
-            vds.vz.to_icechunk(session.store, group=var, mode="w")
-            changed = True
+            last = max(existing[var])
+            if all(m > last for f in new for m in f["months"]):
+                # strictly later months: append along time
+                sub = dict(d, files=new)
+                vds = open_virtual(sub, parser_choice)
+                log.info("%s: appending %d month(s) after %s", var, vds.sizes["time"], last)
+                vds.vz.to_icechunk(session.store, group=var, append_dim="time")
+                changed = True
+                continue
+            # months before/inside the existing range (e.g. older files added
+            # later): rewrite the whole group so time stays monotonic
+            log.info("%s: %d new file(s) fall before %s — rebuilding the variable in time order",
+                     var, len(new), last)
+        vds = open_virtual(d, parser_choice)
+        log.info("%s: writing %d month(s), %d chunk refs, %s", var, vds.sizes["time"],
+                 vds.vz.nrefs(), ", ".join(f"{k}={v}" for k, v in vds.sizes.items()))
+        vds.vz.to_icechunk(session.store, group=var, mode="w")
+        changed = True
     if not changed:
         log.info("store unchanged (nothing to commit)")
-        return prefix
+        return prefixes
     snap = session.commit(f"nc_catalog {'update' if append else 'build'} {datetime.now(timezone.utc).isoformat(timespec='seconds')}")
     log.info("committed snapshot %s", snap)
-    return prefix
+    return prefixes
 
 
 def _existing_months(repo) -> dict[str, set[str]]:
@@ -481,7 +511,7 @@ def _existing_months(repo) -> dict[str, set[str]]:
     return out
 
 
-def catalog_json(args, roots, descs, prefix) -> dict:
+def catalog_json(args, roots, descs, prefixes) -> dict:
     variables = {}
     for d in descs:
         variables[d["var"]] = {
@@ -515,7 +545,8 @@ def catalog_json(args, roots, descs, prefix) -> dict:
         "pattern": args.pattern,
         "var_from": args.var_from,
         "parser": args.parser,
-        "virtual_chunk_container": prefix,
+        "virtual_chunk_container": prefixes[0],
+        "virtual_chunk_containers": prefixes,
         "grid": {
             "nlat": int(first["lat"].size), "nlon": int(first["lon"].size),
             "lat_min": float(first["lat"].min()), "lat_max": float(first["lat"].max()),
@@ -595,11 +626,11 @@ def execute(cmd: str, roots: list[Path], opts) -> int:
             if child.name != "catalog.log":
                 shutil.rmtree(child) if child.is_dir() else child.unlink()
     try:
-        prefix = write_store(opts.out, roots, descs, opts.parser, append=(cmd == "update"))
+        prefixes = write_store(opts.out, roots, descs, opts.parser, append=(cmd == "update"))
     except Exception as e:  # noqa: BLE001
         log.exception("store write failed: %s", e)
         return 3
-    cat = catalog_json(opts, roots, descs, prefix)
+    cat = catalog_json(opts, roots, descs, prefixes)
     (opts.out / "catalog.json").write_text(json.dumps(cat, indent=2, default=_py))
     log.info("wrote %s (%.1fs total)", opts.out / "catalog.json", time.time() - t0)
     return 0
