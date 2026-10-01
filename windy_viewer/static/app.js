@@ -13,7 +13,7 @@
 "use strict";
 
 // The app may be served under a path prefix by a reverse proxy
-// (https://host/ahd-dev/ -> the server's /). API calls are made relative
+// (https://host/some-prefix/ -> the server's /). API calls are made relative
 // to the page's own directory so they go through the same prefix.
 const API = (() => {
   const p = location.pathname;
@@ -469,9 +469,39 @@ const MERC_LAT = 85.0511287798;
 // neighbouring world copy, never reaches an uncovered edge.
 const WORLD_COPIES = [-720, -360, 0, 360, 720];
 
+// ---------------------------------------------------------------- view URL
+// The selection and map view are mirrored into the query string so a link
+// reproduces a view: ?dataset=..&var=..&exp=..&member=..&stat=..&plev=..
+// &time=YYYY-MM&unit=..&compare=1&exp_b=..&member_b=..&stat_b=..&time_b=..
+// &lat=..&lon=..&z=..&globe=1 . URL values take precedence over the
+// browser's remembered state; unknown or malformed values are ignored.
+const URL_VIEW = (() => {
+  const q = new URLSearchParams(location.search);
+  const out = {};
+  const str = (k) => (q.has(k) && q.get(k).trim() ? q.get(k).trim() : null);
+  const num = (k) => (q.has(k) && Number.isFinite(+q.get(k)) ? +q.get(k) : null);
+  for (const [qk, sk] of [["dataset", "dataset"], ["var", "var"], ["exp", "experiment"], ["member", "member"], ["stat", "stat"]]) {
+    const v = str(qk); if (v) out[sk] = v;
+  }
+  if (num("plev") != null) out.plev = num("plev");
+  if (str("time") && /^\d{4}-\d{2}$/.test(str("time"))) out.timeA = str("time");
+  if (str("time_b") && /^\d{4}-\d{2}$/.test(str("time_b"))) out.timeB = str("time_b");
+  if (q.has("compare")) out.compare = q.get("compare") === "1";
+  if (str("exp_b") || str("member_b") || str("stat_b")) {
+    out.b = {};
+    if (str("exp_b")) out.b.experiment = str("exp_b");
+    if (str("member_b")) out.b.member = str("member_b");
+    if (str("stat_b")) out.b.stat = str("stat_b");
+  }
+  if (str("unit") && out.var) out.units = { [out.var]: str("unit") };
+  if (num("lat") != null && num("lon") != null) out.view = { lat: num("lat"), lon: num("lon"), z: num("z") };
+  if (q.get("globe") === "1") out.globe = { open: true, lat0: num("lat"), lon0: num("lon") };
+  return out;
+})();
+
 const map = L.map("map", {
-  center: [22, 10],
-  zoom: 3,
+  center: URL_VIEW.view ? [Math.max(-85, Math.min(85, URL_VIEW.view.lat)), URL_VIEW.view.lon] : [22, 10],
+  zoom: URL_VIEW.view && URL_VIEW.view.z != null ? Math.max(2, Math.min(9, URL_VIEW.view.z)) : 3,
   minZoom: 2,
   maxZoom: 9,
   worldCopyJump: true,
@@ -674,12 +704,59 @@ const statusEl = el("status");
 
 // ---- selection persistence across page refreshes
 const SAVED = (() => {
+  let stored = null;
   try {
-    return JSON.parse(localStorage.getItem("spearViewer") || "null");
-  } catch {
-    return null;
-  }
+    stored = JSON.parse(localStorage.getItem("spearViewer") || "null");
+  } catch { /* storage unavailable */ }
+  if (!Object.keys(URL_VIEW).length) return stored;
+  // A link describes the whole view: whatever it leaves out means the
+  // defaults (so it looks the same for everyone), not this browser's
+  // remembered selection. Only display preferences carry over.
+  const base = stored || {};
+  const merged = { opacity: base.opacity, particles: base.particles, grat: base.grat,
+                   contours: base.contours, units: { ...(base.units || {}) }, ...URL_VIEW };
+  if (URL_VIEW.units) merged.units = { ...(base.units || {}), ...URL_VIEW.units };
+  return merged;
 })();
+
+// Write the current view into the query string (no reload, no history entry).
+let urlSyncTimer = null;
+function syncUrl() {
+  if (!meta || datasetSwitching) return;
+  const q = new URLSearchParams();
+  q.set("dataset", state.dataset);
+  q.set("var", state.var);
+  if (Object.keys(meta.experiments).length > 1) q.set("exp", state.experiment);
+  if (meta.ensemble) { q.set("member", state.member); q.set("stat", state.stat); }
+  if (meta.variables[state.var] && meta.variables[state.var].plev) q.set("plev", state.plev);
+  q.set("time", el("month-input").value);
+  const unit = state.units[state.var];
+  if (unit) q.set("unit", unit);
+  if (state.compare) {
+    q.set("compare", "1");
+    if (Object.keys(meta.experiments).length > 1) q.set("exp_b", state.b.experiment);
+    if (meta.ensemble) { q.set("member_b", state.b.member); q.set("stat_b", state.b.stat); }
+    q.set("time_b", el("month-input-b").value);
+  }
+  const onGlobe = typeof globe !== "undefined" && globe.open;
+  if (onGlobe) {
+    q.set("globe", "1");
+    q.set("lat", globe.lat0.toFixed(2));
+    q.set("lon", globe.lon0.toFixed(2));
+  } else {
+    const c = map.getCenter();
+    q.set("lat", c.lat.toFixed(2));
+    q.set("lon", (((c.lng + 180) % 360 + 360) % 360 - 180).toFixed(2));
+    q.set("z", String(map.getZoom()));
+  }
+  const next = `${location.pathname}?${q}`;
+  if (next !== location.pathname + location.search) history.replaceState(null, "", next);
+}
+function scheduleUrlSync() {
+  clearTimeout(urlSyncTimer);
+  urlSyncTimer = setTimeout(syncUrl, 300);
+}
+map.on("moveend zoomend", scheduleUrlSync);
 
 // lat/lon graticule toggles — shared by the flat map and the globe
 const gratState = {
@@ -745,6 +822,7 @@ function saveState() {
       },
     }));
   } catch { /* storage unavailable — persistence is best-effort */ }
+  scheduleUrlSync();
 }
 
 function setStatus(msg, isError) {
@@ -1942,7 +2020,7 @@ function rebuildUnitSeg() {
     "unit-seg",
     unitOptionsFor(state.var).map((u) => [u.id, u.label]),
     state.units[state.var],
-    (id) => { state.units[state.var] = id; renderMeta(); }
+    (id) => { state.units[state.var] = id; renderMeta(); saveState(); }
   );
 }
 
@@ -2034,7 +2112,7 @@ function buildDatasetSeg() {
                      grat: saved.grat, contours: saved.contours, globe: saved.globe, units: saved.units };
       localStorage.setItem("spearViewer", JSON.stringify(keep));
     } catch { /* best effort */ }
-    location.reload();
+    location.assign(`${location.pathname}?dataset=${encodeURIComponent(id)}`);
   }, Object.fromEntries(ok.map((d) => [d.id, d.description || d.subtitle || d.title])));
 }
 
