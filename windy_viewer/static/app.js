@@ -884,12 +884,20 @@ function toFloat32(rows, nlat, nlon) {
 
 // Bilinear sample of a flat [nlat*nlon] Float32Array at (lat, lon);
 // wraps across the antimeridian. g holds grid geometry.
+// Regional (non-wrapping) grids carry wrap === false: outside their
+// longitude span there is simply no data.
 function sampleGrid(g, arr, lat, lon) {
-  const x = ((((lon - g.lon0) / g.dlon) % g.nlon) + g.nlon) % g.nlon;
+  let x = (lon - g.lon0) / g.dlon;
+  if (g.wrap === false) {
+    if (x < 0 || x > g.nlon - 1) return null;
+  } else {
+    x = ((x % g.nlon) + g.nlon) % g.nlon;
+  }
   const y = (lat - g.lat0) / g.dlat;
   if (y < 0 || y > g.nlat - 1) return null;
   const x0 = x | 0, y0 = y | 0;
-  const x1 = (x0 + 1) % g.nlon, y1 = Math.min(y0 + 1, g.nlat - 1);
+  const x1 = g.wrap === false ? Math.min(x0 + 1, g.nlon - 1) : (x0 + 1) % g.nlon;
+  const y1 = Math.min(y0 + 1, g.nlat - 1);
   const tx = x - x0, ty = y - y0;
   const n = g.nlon;
   const v00 = arr[y0 * n + x0], v10 = arr[y0 * n + x1];
@@ -910,7 +918,11 @@ function nearestCell(g, lat, lon) {
   let i = Math.round((lat - g.lat0) / g.dlat);
   let j = Math.round((lon - g.lon0) / g.dlon);
   i = Math.max(0, Math.min(g.nlat - 1, i));
-  j = ((j % g.nlon) + g.nlon) % g.nlon;
+  if (g.wrap === false) {
+    if (j < 0 || j > g.nlon - 1) return { value: null, lat: g.lat0 + i * g.dlat, lon };
+  } else {
+    j = ((j % g.nlon) + g.nlon) % g.nlon;
+  }
   const v = g._grid[i * g.nlon + j];
   return {
     value: Number.isNaN(v) ? null : v,
@@ -927,6 +939,7 @@ function renderFieldToURL(d, lut, filter) {
   const fLo = filter ? filter.lo : null;
   const fHi = filter ? filter.hi : null;
   const { nlat, nlon, lat0, dlat, lon0, dlon } = d;
+  const wrap = d.wrap !== false;
   const W = 1600, H = 1250;
   const canvas = document.createElement("canvas");
   canvas.width = W;
@@ -940,9 +953,14 @@ function renderFieldToURL(d, lut, filter) {
   const ctx_ = new Float32Array(W);
   for (let c = 0; c < W; c++) {
     const lon = -180 + (360 * c) / (W - 1);
-    const x = ((((lon - lon0) / dlon) % nlon) + nlon) % nlon;
+    let x = (lon - lon0) / dlon;
+    if (!wrap) {
+      if (x < 0 || x > nlon - 1) { cx0[c] = -1; continue; } // outside the domain: transparent
+    } else {
+      x = ((x % nlon) + nlon) % nlon;
+    }
     cx0[c] = x | 0;
-    cx1[c] = (cx0[c] + 1) % nlon;
+    cx1[c] = wrap ? (cx0[c] + 1) % nlon : Math.min(cx0[c] + 1, nlon - 1);
     ctx_[c] = x - cx0[c];
   }
 
@@ -959,6 +977,7 @@ function renderFieldToURL(d, lut, filter) {
     const row0 = y0 * nlon, row1 = y1 * nlon;
     let k = r * W * 4;
     for (let c = 0; c < W; c++, k += 4) {
+      if (cx0[c] < 0) continue;
       const tx = ctx_[c];
       const v00 = grid[row0 + cx0[c]], v10 = grid[row0 + cx1[c]];
       const v01 = grid[row1 + cx0[c]], v11 = grid[row1 + cx1[c]];
@@ -1313,7 +1332,7 @@ function windReadout(lat, lon) {
   const spec = unitSpecFor("sfcWind");
   const speed = convVal(Math.hypot(u, v), spec);
   const dirFrom = (270 - (Math.atan2(v, u) * 180) / Math.PI + 360) % 360;
-  const levTag = currentWind.plev ? ` (${currentWind.plev} hPa)` : " (10 m)";
+  const levTag = currentWind.plev ? ` (${currentWind.plev} ${meta.level_units})` : " (10 m)";
   return `<br>wind${levTag} ${speed.toFixed(spec.decimals)} ${spec.unit} from ${Math.round(dirFrom)}&deg;`;
 }
 
@@ -1328,7 +1347,7 @@ function selLabel(f) {
     stat === "anom" ? `${f.member} − mean` :
     f.member === "ensmean" ? "ens mean" : f.member;
   // datasets without an ensemble have no member: omit the empty segment
-  return [m, f.time].filter(Boolean).join(" · ") + (f.plev ? ` · ${f.plev} hPa` : "");
+  return [m, f.time].filter(Boolean).join(" · ") + (f.plev ? ` · ${f.plev} ${meta.level_units}` : "");
 }
 
 // idx: station index (0-based) for pin cards, -1 for the ad-hoc popup.
@@ -1735,7 +1754,7 @@ async function loadField() {
         units: fa.units,
         label: `Δ ${fa.label} (A−B)`,
         nlat: fa.nlat, nlon: fa.nlon,
-        lat0: fa.lat0, dlat: fa.dlat, lon0: fa.lon0, dlon: fa.dlon,
+        lat0: fa.lat0, dlat: fa.dlat, lon0: fa.lon0, dlon: fa.dlon, wrap: fa.wrap,
         _grid: diff,
       };
       // Let the checkbox/controls repaint before the heavy render.
@@ -2098,6 +2117,7 @@ function buildVarButtons() {
     return blocks[g].seg;
   };
   const plevGroup = Object.values(meta.variables).find((v) => v.plev);
+  el("plev-title").textContent = meta.level_label ? `${meta.level_label}s` : "Levels";
   if (plevGroup) {
     // make sure the block exists, then attach the level sub-block to it
     const g = plevGroup.group || "";
@@ -2144,17 +2164,17 @@ function buildVarButtons() {
 function buildPlevDropdown() {
   const btn = el("plev-btn");
   const list = el("plev-list");
-  btn.textContent = `${state.plev} hPa`;
+  btn.textContent = `${state.plev} ${meta.level_units}`;
   list.innerHTML = "";
   for (const p of meta.levels) {
     const item = document.createElement("div");
     item.className = "dd-item" + (p === state.plev ? " selected" : "");
-    item.textContent = `${p} hPa`;
+    item.textContent = `${p} ${meta.level_units}`;
     item.addEventListener("click", () => {
       state.plev = p;
-      btn.textContent = `${p} hPa`;
+      btn.textContent = `${p} ${meta.level_units}`;
       list.querySelectorAll(".dd-item").forEach((i) =>
-        i.classList.toggle("selected", i.textContent === `${p} hPa`)
+        i.classList.toggle("selected", i.textContent === `${p} ${meta.level_units}`)
       );
       list.hidden = true;
       if (meta.variables[state.var].plev) loadField();
@@ -3006,11 +3026,17 @@ function globeRender(fast) {
         const r0 = pRow[k1];
         v = null;
         if (r0 >= 0) {
-          let xw = (pX[k1] + shift) % nlon;
-          if (xw < 0) xw += nlon;
+          let xw = pX[k1] + shift;
+          if (d.wrap === false) {
+            if (xw < 0 || xw > nlon - 1) { v = null; xw = NaN; }
+          } else {
+            xw %= nlon;
+            if (xw < 0) xw += nlon;
+          }
+          if (xw !== xw) { /* outside a regional grid */ } else {
           const xi = xw | 0;
           const tx = xw - xi;
-          const xj = xi + 1 === nlon ? 0 : xi + 1;
+          const xj = xi + 1 === nlon ? (d.wrap === false ? xi : 0) : xi + 1;
           const r1 = r0 + nlon < total ? r0 + nlon : r0;
           const ty = pTy[k1];
           const v00 = grid[r0 + xi], v10 = grid[r0 + xj], v01 = grid[r1 + xi], v11 = grid[r1 + xj];
@@ -3019,6 +3045,7 @@ function globeRender(fast) {
             v = vn !== vn ? null : vn;
           } else {
             v = v00 * (1 - tx) * (1 - ty) + v10 * tx * (1 - ty) + v01 * (1 - tx) * ty + v11 * tx * ty;
+          }
           }
         }
       } else {
@@ -4502,7 +4529,7 @@ function boxRefresh() {
   const v = meta.variables[state.var];
   el("box-sel").textContent =
     `${v.label} (${state.var}) · ${expShort(state.experiment)} · ` +
-    `${boxStatText()}${v.plev ? ` · ${state.plev} hPa` : ""}`;
+    `${boxStatText()}${v.plev ? ` · ${state.plev} ${meta.level_units}` : ""}`;
 
   // month range: default to the displayed month; keep inside the scenario
   const exp = meta.experiments[state.experiment];
@@ -5039,6 +5066,7 @@ function contourSegments(d, levels) {
     const latA = lat0 + i * dlat, latB = latA + dlat;
     const rowA = i * nlon, rowB = rowA + nlon;
     for (let j = 0; j < nlon; j++) {
+      if (j + 1 === nlon && d.wrap === false) break; // regional grid: no seam cell
       const j1 = j + 1 === nlon ? 0 : j + 1;
       const v00 = g[rowA + j], v10 = g[rowA + j1], v01 = g[rowB + j], v11 = g[rowB + j1];
       if (v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) continue;

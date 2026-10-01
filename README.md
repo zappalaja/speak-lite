@@ -89,6 +89,42 @@ in the order the panel shows them; the first is the default:
 * A dataset that fails to open (no network, missing catalog) is reported in
   `/api/meta` and skipped in the panel; the others still work.
 
+### Adding any ArrayLake repo
+
+An entry needs only the repo name; everything else is discovered from the
+store when the server starts:
+
+```json
+{ "id": "cefi_nwa", "type": "arraylake", "repo": "NOAA-PMEL/cefi-nwa-hindcast-monthly",
+  "title": "CEFI NWA12 hindcast",
+  "variables": { "tos": { "label": "SST" }, "sos": { "label": "SSS" }, "thetao": { "label": "Potential temperature" } } }
+```
+
+* **Groups → experiments.** The Zarr hierarchy is walked (3 levels deep);
+  every group holding `(time, y, x)` variables becomes an experiment named
+  by its path (`raw/main`), with its period read from the time axis.
+  SPEAR-style `<experiment>/<group>` layouts with known periods can still
+  be given explicitly (`experiments` + `groups`).
+* **Grid.** A regular `lat`/`lon` grid is used as is. A curvilinear grid
+  (2-D `geolat`/`geolon`, e.g. regional MOM6 output) is regridded on the
+  fly to a regular lat/lon grid at its native median spacing — nearest
+  neighbour, index built once (seconds) and cached under
+  `VIEWER_DATA_DIR/regrid/`. Regional domains render as such (no wrap);
+  cells outside the domain are transparent.
+* **Levels / ensemble.** A vertical dimension (`plev`, `z_l`, `depth`, …)
+  becomes the level dropdown in its own units (hPa or m — "Pressure level"
+  vs "Depth"); a `member`-like dimension enables the ensemble statistics.
+* **Variables.** All plain `(time[, level][, member], y, x)` variables are
+  offered; staggered-grid or category-dimension variables are skipped.
+  Big stores (CEFI has ~500) should list `variables` (whitelist + labels)
+  or `include` (names/regexes); otherwise the first `max_variables` (80)
+  are shown with a warning in the log.
+* **Time chunking.** Stores chunked along time (CEFI: 100 months per
+  chunk) make one month cost the whole chunk; the viewer reads the block
+  once, caches it (`block_*.npy` in the cache dir, LRU-bounded) and serves
+  the other months of that block instantly. The first month of a new
+  block/variable/level takes ~10 s on a fast link.
+
 Display units are derived from each variable's `units` attribute
 (`K`/`deg_k` → °C, `kg m-2 s-1`/`kg/m2/s` → mm/day, `Pa` → hPa, ...);
 unknown units are shown as-is with an auto-scaled colour ramp.

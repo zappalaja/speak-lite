@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to datasets.json (or point VIEWER_DATASETS at it). Order = order in the UI; the first entry is the default. A bare SPEAR entry inherits the built-in curated variable table.",
+  "_comment": "Copy to datasets.json (or point VIEWER_DATASETS at it). Order = order in the UI; the first entry is the default. A bare SPEAR entry inherits the built-in curated variable table. Any other ArrayLake repo is discovered automatically (groups, grid, levels, ensemble); list 'variables' to choose which of its variables to show.",
   "datasets": [
     {
       "id": "spear",
@@ -15,7 +15,58 @@
       "subtitle": "SPEAR c96 ECDA J11 · monthly",
       "description": "GFDL SPEAR ensemble coupled data assimilation, monthly means on a 1 x 1.25 deg grid",
       "variables": {
-        "t_surf": { "label": "Surface temperature" }
+        "t_surf": {
+          "label": "Surface temperature"
+        }
+      }
+    },
+    {
+      "id": "cefi_nwa",
+      "type": "arraylake",
+      "repo": "NOAA-PMEL/cefi-nwa-hindcast-monthly",
+      "branch": "main",
+      "title": "CEFI NWA12 hindcast",
+      "subtitle": "MOM6-COBALT Northwest Atlantic · monthly 1993–2023",
+      "description": "NOAA CEFI regional ocean hindcast (MOM6/COBALT, NWA12 ~1/12 deg grid), monthly means; regridded by the viewer to a regular 0.065 x 0.08 deg lat/lon grid (nearest neighbour)",
+      "home": "https://psl.noaa.gov/cefi_portal/",
+      "link": "https://app.earthmover.io/NOAA-PMEL/cefi-nwa-hindcast-monthly",
+      "variables": {
+        "tos": {
+          "label": "SST"
+        },
+        "sos": {
+          "label": "SSS"
+        },
+        "ssh": {
+          "label": "Sea surface height"
+        },
+        "MLD_003": {
+          "label": "Mixed layer depth"
+        },
+        "btm_temp": {
+          "label": "Bottom temperature"
+        },
+        "btm_o2": {
+          "label": "Bottom O2"
+        },
+        "chlos": {
+          "label": "Surface chlorophyll"
+        },
+        "siconc": {
+          "label": "Sea-ice concentration"
+        },
+        "sithick": {
+          "label": "Sea-ice thickness"
+        },
+        "thetao": {
+          "label": "Potential temperature"
+        },
+        "so": {
+          "label": "Salinity"
+        },
+        "o2": {
+          "label": "Dissolved O2"
+        }
       }
     }
   ]

@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -266,26 +267,75 @@ def _select_stat(src, ds: xr.Dataset, var: str, member: str, time: str, stat: st
 def _level_group(src, ds, da, lev):
     """Stores that chunk the level dimension in groups (SPEAR: 9 levels per
     chunk) make one level cost the whole group's download. Return the
-    loaded group containing `lev` (hPa) so every level in it can be cached."""
+    loaded group containing `lev` so every level in it can be cached."""
     ldim = src.level_dim
     lvals = ds[ldim].values
     idx = int(np.argmin(np.abs(lvals - lev * src.level_scale)))
     k = max(1, int(src.level_chunk))
     g0 = (idx // k) * k
-    return _load_da(da.isel({ldim: slice(g0, min(g0 + k, lvals.size))}))
+    return src.load(da.isel({ldim: slice(g0, min(g0 + k, lvals.size))}))
 
 
-def _grid_meta(ds: xr.Dataset) -> dict:
+_block_lock = threading.Lock()
+
+
+def _safe(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s))
+
+
+def _read_month(src, ds, var, member, stat, time, lev, experiment="") -> xr.DataArray:
+    """One loaded 2-D field (lat, lon) for a month.
+
+    Stores chunked along time (e.g. 100 months per chunk) make a single
+    month cost the whole chunk's download, so for those the complete block
+    is read once, kept as float32 in the cache directory and sliced from
+    there afterwards — the other months of the block are then instant."""
+    da = src.level_select(_select_stat(src, ds, var, member, time, stat), lev)
+    tc = int(src.time_chunk or 1)
+    if tc <= 1 or not CACHE_ENABLED:
+        return src.load(da)
+    times = ds.time.values
+    tidx = int(np.flatnonzero(times == da.time.values)[0])
+    b0 = (tidx // tc) * tc
+    b1 = min(b0 + tc, times.size)
+    lk = f"_L{lev:g}" if lev is not None else ""
+    bpath = CACHE_DIR / f"block_{src.id}_{_safe(experiment)}_{var}_{_stat_token(stat, member)}{lk}_{b0}.npy"
+    with _block_lock:
+        if bpath.exists():
+            os.utime(bpath)
+            arr = np.array(np.load(bpath, mmap_mode="r")[tidx - b0])
+        else:
+            vals = src.read_block(experiment, var, b0, b1, stat, member, lev)
+            try:
+                np.save(bpath, vals)
+                with _cache_lock:
+                    _evict_cache()
+            except OSError as e:
+                print(f"[viewer] cannot write block cache {bpath.name}: {e}")
+            arr = vals[tidx - b0]
+    return da.copy(data=arr)
+
+
+def _grid_meta(ds: xr.Dataset, wrap: bool = True) -> dict:
+    """Regular-grid geometry for the frontend. Global grids are rolled so
+    the first column is at -180; regional ones (wrap=False) are sent as is
+    with their first longitude in -180..180."""
     lon = ds.lon.values.astype(np.float64)
     lat = ds.lat.values.astype(np.float64)
-    shift = int(np.searchsorted(lon, 180.0))
+    if wrap:
+        shift = int(np.searchsorted(lon, 180.0))
+        lon0 = float(lon[shift] - 360.0)
+    else:
+        shift = 0
+        lon0 = float(lon[0] - 360.0 if lon[0] > 180.0 else lon[0])
     return {
         "nlat": int(lat.size),
         "nlon": int(lon.size),
         "lat0": float(lat[0]),
         "dlat": float(lat[1] - lat[0]),
-        "lon0": float(lon[shift] - 360.0),
+        "lon0": lon0,
         "dlon": float(lon[1] - lon[0]),
+        "wrap": bool(wrap),
         "_shift": shift,
     }
 
@@ -303,8 +353,8 @@ def _load_values(da: xr.DataArray) -> np.ndarray:
     raise HTTPException(503, f"data store temporarily unreachable: {last}")
 
 
-def _load_da(da: xr.DataArray) -> xr.DataArray:
-    """da.load() with the same retry behaviour as _load_values."""
+def _retry_load(da: xr.DataArray) -> xr.DataArray:
+    """da.load() with retries (point extractions; fields go through src.load)."""
     last = None
     for attempt in range(3):
         try:
@@ -358,13 +408,12 @@ def field(
     token = _stat_token(stat, member)
     lev = src.nearest_level(plev) if cfg["plev"] else None
     suffix = f"_p{lev}" if lev is not None else ""
-    cache_path = CACHE_DIR / f"{src.id}_{var}_{experiment}_{token}_{time}{suffix}.json"
+    cache_path = CACHE_DIR / f"{src.id}_{var}_{_safe(experiment)}_{token}_{time}{suffix}.json"
     cached = _cache_get(cache_path)
     if cached is not None:
         return cached
 
-    da = _select_stat(src, ds, var, member, time, stat)
-    grid = _grid_meta(ds)
+    grid = _grid_meta(ds, src.wrap)
     shift = grid.pop("_shift")
     # spread/deviation are difference-like: the unit offset cancels (a 2 K
     # spread is 2 °C of spread, not -271 °C).
@@ -382,21 +431,23 @@ def field(
         }
         return json.dumps(payload, separators=(",", ":")).encode()
 
-    if lev is not None:
+    if lev is not None and src.time_chunk <= 1:
+        # level-chunked store (SPEAR): load the whole level group once
+        da = _select_stat(src, ds, var, member, time, stat)
         ldim = src.level_dim
         group = _level_group(src, ds, da, lev)
         body = None
         for k in range(group.sizes[ldim]):
             da_k = group.isel({ldim: k})
-            lev_k = src.level_hpa(da_k)
+            lev_k = src.level_value(da_k)
             body_k = payload_bytes(da_k, lev_k)
-            _cache_put(CACHE_DIR / f"{src.id}_{var}_{experiment}_{token}_{time}_p{lev_k}.json", body_k)
+            _cache_put(CACHE_DIR / f"{src.id}_{var}_{_safe(experiment)}_{token}_{time}_p{lev_k}.json", body_k)
             if lev_k == lev:
                 body = body_k
         if body is None:
-            body = payload_bytes(_load_da(src.level_select(da, lev)), lev)
+            body = payload_bytes(src.load(src.level_select(da, lev)), lev)
     else:
-        body = payload_bytes(_load_da(da), None)
+        body = payload_bytes(_read_month(src, ds, var, member, stat, time, lev, experiment), lev)
         _cache_put(cache_path, body)
     return Response(body, media_type="application/json")
 
@@ -421,12 +472,12 @@ def wind(
     ds_v = _open(src, experiment, vname)
     lev = src.nearest_level(plev) if plev else None
     suffix = f"_p{lev}" if lev is not None else ""
-    cache_path = CACHE_DIR / f"{src.id}_wind_{experiment}_{member}_{time}{suffix}.json"
+    cache_path = CACHE_DIR / f"{src.id}_wind_{_safe(experiment)}_{member}_{time}{suffix}.json"
     cached = _cache_get(cache_path)
     if cached is not None:
         return cached
 
-    grid = _grid_meta(ds)
+    grid = _grid_meta(ds, src.wrap)
     shift = grid.pop("_shift")
     stat = "mean" if member == "ensmean" else "raw"
     if not src.ensemble_dim:
@@ -443,24 +494,25 @@ def wind(
         }
         return json.dumps(payload, separators=(",", ":")).encode()
 
-    da_u = _select_stat(src, ds, uname, member, time, stat)
-    da_v = _select_stat(src, ds_v, vname, member, time, stat)
-    if lev is not None:
+    if lev is not None and src.time_chunk <= 1:
+        da_u = _select_stat(src, ds, uname, member, time, stat)
+        da_v = _select_stat(src, ds_v, vname, member, time, stat)
         ldim = src.level_dim
         u_group = _level_group(src, ds, da_u, lev)
         v_group = _level_group(src, ds_v, da_v, lev)
         body = None
         for k in range(u_group.sizes[ldim]):
-            lev_k = src.level_hpa(u_group.isel({ldim: k}))
+            lev_k = src.level_value(u_group.isel({ldim: k}))
             body_k = wind_payload_bytes(u_group.isel({ldim: k}), v_group.isel({ldim: k}), lev_k)
-            _cache_put(CACHE_DIR / f"{src.id}_wind_{experiment}_{member}_{time}_p{lev_k}.json", body_k)
+            _cache_put(CACHE_DIR / f"{src.id}_wind_{_safe(experiment)}_{member}_{time}_p{lev_k}.json", body_k)
             if lev_k == lev:
                 body = body_k
         if body is None:
-            body = wind_payload_bytes(_load_da(src.level_select(da_u, lev)),
-                                      _load_da(src.level_select(da_v, lev)), lev)
+            body = wind_payload_bytes(src.load(src.level_select(da_u, lev)),
+                                      src.load(src.level_select(da_v, lev)), lev)
     else:
-        body = wind_payload_bytes(_load_da(da_u), _load_da(da_v), None)
+        body = wind_payload_bytes(_read_month(src, ds, uname, member, stat, time, lev, experiment),
+                                  _read_month(src, ds_v, vname, member, stat, time, lev, experiment), lev)
         _cache_put(cache_path, body)
     return Response(body, media_type="application/json")
 
@@ -474,10 +526,8 @@ def _native_month(src, experiment: str, var: str, member: str, time: str,
     cfg = src.variables[var]
     if not src.ensemble_dim:
         stat, member = "raw", ""
-    da = _select_stat(src, ds, var, member, time, stat)
-    if cfg["plev"]:
-        da = src.level_select(da, plev)
-    da = _load_da(da)
+    lev = src.nearest_level(plev) if cfg["plev"] else None
+    da = _read_month(src, ds, var, member, stat, time, lev, experiment)
     if src.ensemble_dim and src.ensemble_dim in da.coords:
         da = da.drop_vars(src.ensemble_dim)
     da.attrs["long_name"] = src.stat_long_name(stat, member, da.attrs.get("long_name", var))
@@ -489,9 +539,9 @@ def _sel_text(src, experiment: str, member: str, time: str,
     if member == "ensmean" and stat == "raw":
         stat = "mean"
     text = f"experiment {experiment}, {src.stat_text(stat, member)}, month {time}"
-    lev = src.level_hpa(da) if da is not None else None
+    lev = src.level_value(da) if da is not None else None
     if lev is not None:
-        text += f", pressure level {lev} hPa"
+        text += f", {src.level_text(lev)}"
     return text
 
 
@@ -586,8 +636,8 @@ def download(
     if member_b == "ensmean" and stat_b == "raw":
         stat_b = "mean"
     da_a = _native_month(src, experiment, var, member, time, plev, stat)
-    lev = src.level_hpa(da_a)
-    lev_suffix = f"_{lev}hPa" if lev is not None else ""
+    lev = src.level_value(da_a)
+    lev_suffix = f"_{lev:g}{src.level_units}" if lev is not None else ""
 
     if compare:
         da_b = _native_month(src, experiment_b, var, member_b, time_b, plev, stat_b)
@@ -714,12 +764,13 @@ def _run_ts_job(job_id: str, p: dict):
         stat = p["stat"]
         offset = 0.0 if stat in ("spread", "anom") else cfg["offset"]
         all_vals, all_times = [], []
-        for b0 in range(0, len(months), TS_BATCH_MONTHS):
+        step = max(TS_BATCH_MONTHS, int(src.time_chunk or 1))  # whole time chunks per read
+        for b0 in range(0, len(months), step):
             if job.get("cancel"):
                 job["error"] = "cancelled"
                 job["done"] = True
                 return
-            batch = months[b0:b0 + TS_BATCH_MONTHS]
+            batch = months[b0:b0 + step]
             da = ds[p["var"]].sel(time=slice(batch[0], batch[-1]))
             da = src.reduce(da, stat, p["member"])
             if cfg["plev"]:
@@ -728,12 +779,12 @@ def _run_ts_job(job_id: str, p: dict):
                 lat=xr.DataArray(ilats, dims="station"),
                 lon=xr.DataArray(ilons, dims="station"),
             )
-            da = _load_da(da)
+            da = _retry_load(da)
             all_times.extend(list(da.time.values))
             all_vals.append(np.asarray(da.values, dtype=np.float64))
             job["progress"] = min(0.97, (b0 + len(batch)) / len(months))
         data = np.concatenate(all_vals, axis=0) * cfg["scale"] + offset
-        lev_txt = f" · {p['plev']} hPa" if cfg["plev"] else ""
+        lev_txt = f" · {p['plev']:g} {src.level_units}" if cfg["plev"] else ""
         sids = p.get("station_ids") or [k + 1 for k in range(len(plats))]
         labels = [
             (f"St {sids[k]} ({_loc_str(plats[k], plons[k])})" if sids[k] > 0
@@ -935,7 +986,7 @@ def ts_data(job_id: str, format: str = Query("csv", pattern="^(csv|nc)$")):
     attrs = _global_attrs(src, p["var"], src.download_attrs(p["experiment"], p["var"]), {
         "title": f"{src.title} station time series: {p['var']}",
         "selection": f"experiment {p['experiment']}, {src.stat_text(p['stat'], p['member'])}"
-                     + (f", pressure level {p['plev']} hPa" if cfg["plev"] else ""),
+                     + (f", {src.level_text(p['plev'])}" if cfg["plev"] else ""),
         "statistic": src.stat_text(p["stat"], p["member"]),
         "stations": "; ".join(
             f"station {k + 1}: {_loc_str(r['plats'][k], r['plons'][k])}"
@@ -1060,12 +1111,13 @@ def _run_box_job(job_id: str, p: dict):
         months = p["months"]
         stat = p["stat"]
         parts = []
-        for b0 in range(0, len(months), TS_BATCH_MONTHS):
+        step = max(TS_BATCH_MONTHS, int(src.time_chunk or 1))
+        for b0 in range(0, len(months), step):
             if job.get("cancel"):
                 job["error"] = "cancelled"
                 job["done"] = True
                 return
-            batch = months[b0:b0 + TS_BATCH_MONTHS]
+            batch = months[b0:b0 + step]
             da = ds[p["var"]].sel(time=slice(batch[0], batch[-1]))
             da = src.reduce(da, stat, p["member"])
             if cfg["plev"]:
@@ -1075,7 +1127,7 @@ def _run_box_job(job_id: str, p: dict):
                 da = da.isel(lon=lon_sls[0])
             else:
                 da = xr.concat([da.isel(lon=sl) for sl in lon_sls], dim="lon")
-            da = _load_da(da)
+            da = src.load(da)
             if src.ensemble_dim and src.ensemble_dim in da.coords:
                 da = da.drop_vars(src.ensemble_dim)
             parts.append(da)
@@ -1205,9 +1257,9 @@ def box_data(job_id: str, format: str = Query("nc", pattern="^(nc|csv)$")):
     var = p["var"]
     src = _src(p["dataset"])
     box = p["box"]
-    lev = src.level_hpa(da)
-    lev_txt = f", pressure level {lev} hPa" if lev is not None else ""
-    lev_suffix = f"_{lev}hPa" if lev is not None else ""
+    lev = src.level_value(da)
+    lev_txt = f", {src.level_text(lev)}" if lev is not None else ""
+    lev_suffix = f"_{lev:g}{src.level_units}" if lev is not None else ""
     lat = da.lat.values
     lon = da.lon.values
     attrs = _global_attrs(src, var, src.download_attrs(p["experiment"], var), {
@@ -1265,7 +1317,7 @@ def _ts_summary(job_id: str) -> str:
     p = r["params"]
     src = _src(p["dataset"])
     cfg = src.variables[p["var"]]
-    lev = f", {p['plev']} hPa" if cfg["plev"] else ""
+    lev = f", {src.level_text(p['plev'])}" if cfg["plev"] else ""
     lines = [
         f"{p['var']} ({src.stat_text(p['stat'], p['member'])}), "
         f"experiment {p['experiment']}{lev}, {p['start']} to {p['end']} "
@@ -1403,11 +1455,10 @@ def _display_field(src, varname, experiment, member, time, plev, stat="raw"):
     if not src.ensemble_dim:
         stat, member = "raw", ""
     ds = _open(src, experiment, varname)
-    da = _select_stat(src, ds, varname, member, time, stat)
-    if cfg["plev"]:
-        da = src.level_select(da, plev)
+    lev = src.nearest_level(plev) if cfg["plev"] else None
+    da = _read_month(src, ds, varname, member, stat, time, lev, experiment)
     offset = 0.0 if stat in ("spread", "anom") else cfg["offset"]
-    vals = _load_values(da).astype(np.float64) * cfg["scale"] + offset
+    vals = da.values.astype(np.float64) * cfg["scale"] + offset
     return vals, ds.lat.values.astype(float), ds.lon.values.astype(float)
 
 
@@ -1429,7 +1480,7 @@ def _build_view_context(src, view):
         stat = "raw"
     time = view.get("time") or src.experiments[experiment]["start"]
     plev = view.get("plev")
-    lev_txt = f" at {plev} hPa" if cfg["plev"] and plev else ""
+    lev_txt = f" at {src.level_text(src.nearest_level(plev))}" if cfg["plev"] else ""
     mem_txt = src.stat_text("mean" if member == "ensmean" and stat == "raw" else stat, member)
     lines = [f"Variable: {var} — {cfg['long']} (displayed in {cfg['units']})"]
     try:

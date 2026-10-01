@@ -2,9 +2,13 @@
 
 A *source* is one dataset the viewer can display. Two kinds exist:
 
-* ``ArrayLakeSource`` — an ArrayLake/Icechunk repo (e.g. the public SPEAR
-  large ensemble), organised as ``<experiment>/<group>`` Zarr groups with an
-  ensemble dimension and pressure levels.
+* ``ArrayLakeSource`` — any ArrayLake/Icechunk repo. The Zarr hierarchy is
+  discovered automatically: every group holding ``(time, y, x)`` variables
+  becomes an *experiment*; a regular ``lat``/``lon`` grid is used as is, a
+  curvilinear grid (2-D ``geolat``/``geolon``) is regridded on the fly to a
+  regular grid (nearest neighbour, index cached). Ensemble and level
+  dimensions are picked up when present. The SPEAR large ensemble is the
+  built-in default (with curated labels).
 * ``CatalogSource`` — a local Icechunk store built by ``tools/nc_catalog.py``
   from a directory of NetCDF files (virtual chunk references into the
   files: nothing is copied). One Zarr group per variable, no ensemble.
@@ -12,9 +16,9 @@ A *source* is one dataset the viewer can display. Two kinds exist:
 Both expose the same description (experiments, variables, members, levels,
 wind pairs, display-unit conversion) and the same ``open(experiment, var)``
 returning an xarray Dataset whose ``var`` has dims
-``(time[, <ensemble>][, <level>], lat, lon)`` with ascending lat and
-0..360 lon — everything server.py needs, so the endpoints never care which
-kind they are talking to.
+``(time[, <ensemble>][, <level>], lat, lon)`` with ascending lat — so
+server.py never cares which kind it is talking to. Materialise arrays
+through ``src.load(da)`` (retries + the regrid mask).
 
 Sources are configured in a JSON file (``VIEWER_DATASETS``, default
 ``datasets.json`` next to the repo root); without one the built-in SPEAR
@@ -22,11 +26,13 @@ definition is used so the viewer behaves exactly as before.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import threading
+import time as _time
 import warnings
 from pathlib import Path
 
@@ -42,6 +48,8 @@ os.environ.setdefault("ICECHUNK_LOG", "error")
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
+# where regrid indexes are cached (next to the server's field cache)
+INDEX_DIR = Path(os.environ.get("VIEWER_DATA_DIR") or BASE_DIR / "data") / "regrid"
 
 # ---------------------------------------------------------------- units
 # Native-unit string -> display conversion. Keyed on a normalised form of
@@ -53,17 +61,18 @@ REPO_DIR = BASE_DIR.parent
 _UNIT_RULES = [
     # (regex on normalised units, scale, offset, display units, family)
     (r"^(k|deg_?k|kelvin|degrees?_?k(elvin)?)$", 1.0, -273.15, "°C", "temp"),
-    (r"^(deg_?c|celsius|degrees?_?c(elsius)?|°c)$", 1.0, 0.0, "°C", "temp"),
+    (r"^(deg_?c|celsius|degrees?_?c(elsius)?|°c|degc)$", 1.0, 0.0, "°C", "temp"),
     (r"^(kg/?m\^?-?2/?s\^?-?1|kgm-2s-1|kg/m2/s|kg/m\^2/s)$", 86400.0, 0.0, "mm/day", "precip"),
     (r"^(mm/day|mm/d|mmday-1)$", 1.0, 0.0, "mm/day", "precip"),
     (r"^(mm/hr|mm/h)$", 24.0, 0.0, "mm/day", "precip"),
     (r"^pa$", 0.01, 0.0, "hPa", "pressure"),
     (r"^(hpa|mb|mbar|millibar)$", 1.0, 0.0, "hPa", "pressure"),
-    (r"^(m/s|ms-1|ms\^-1|m/sec|meters?/second)$", 1.0, 0.0, "m/s", "wind"),
+    (r"^(m/s|ms-1|ms\^-1|m/sec|meters?/second|ms\^\{-1\})$", 1.0, 0.0, "m/s", "wind"),
     (r"^(w/?m\^?-?2|wm-2|w/m2|w/m\^2)$", 1.0, 0.0, "W/m²", "radiation"),
     (r"^(m|meters?|metres?)$", 1.0, 0.0, "m", "length"),
-    (r"^(kg/kg|kgkg-1|1|none|dimensionless|fraction)$", 1.0, 0.0, "kg/kg", "ratio"),
+    (r"^(kg/kg|kgkg-1)$", 1.0, 0.0, "kg/kg", "ratio"),
     (r"^(%|percent)$", 1.0, 0.0, "%", "percent"),
+    (r"^(psu|1e-3|0\.001|g/kg)$", 1.0, 0.0, "psu", "salinity"),
 ]
 
 
@@ -84,27 +93,143 @@ def display_units(native: str) -> dict:
 
 # ---------------------------------------------------------------- wind pairs
 # (u, v) component names the particle animation can use, in priority order.
-WIND_PAIRS = [("uas", "vas"), ("u_ref", "v_ref"), ("u10", "v10"), ("ua", "va"),
-              ("ucomp", "vcomp"), ("u", "v")]
+WIND_PAIRS = [("uas", "vas"), ("u_ref", "v_ref"), ("u10", "v10"), ("ssu", "ssv"), ("ua", "va"),
+              ("ucomp", "vcomp"), ("uo", "vo"), ("u", "v")]
 
 AUX_DIMS = {"time", "lat", "lon", "latitude", "longitude", "bnds", "nv", "x", "y"}
-LEVEL_DIMS = ("plev", "pfull", "level", "lev", "pressure", "p")
+LEVEL_DIMS = ("plev", "pfull", "level", "lev", "pressure", "p", "z_l", "zl", "depth", "deptht", "z", "height")
+ENSEMBLE_DIMS = ("member_id", "member", "ens", "ensemble", "realization", "run")
+LATLON_2D = [("geolat", "geolon"), ("lat", "lon"), ("latitude", "longitude"), ("nav_lat", "nav_lon"),
+             ("GEOLAT", "GEOLON"), ("TLAT", "TLON"), ("tlat", "tlon")]
 
 
 def _retry(fn, attempts=3):
     """Call fn() with retries — transient network stalls to S3 otherwise
     fail the request."""
-    import time as _t
     last = None
     for k in range(attempts):
         try:
             return fn()
         except Exception as e:  # noqa: BLE001
             last = e
-            _t.sleep(1.5 * (k + 1))
+            _time.sleep(1.5 * (k + 1))
     raise last
 
 
+def _ym(t) -> str:
+    return f"{t.year:04d}-{t.month:02d}"
+
+
+def _nice(x: float) -> float:
+    r = round(x, 3)
+    return int(r) if r == int(r) else r
+
+
+# ---------------------------------------------------------------- regridding
+class Regridder:
+    """Nearest-neighbour map from a curvilinear (2-D lat/lon) grid onto a
+    regular lat/lon grid at the native median spacing (capped at
+    ``max_cells``). Applied lazily with xarray vectorised indexing, so only
+    the chunks a request needs are read; the 'outside the domain' mask is
+    applied when values are materialised (``Source.load``)."""
+
+    def __init__(self, geolat: np.ndarray, geolon: np.ndarray, cache_file: Path | None = None,
+                 max_cells: int = 1_500_000):
+        self.cache_file = cache_file
+        if cache_file and cache_file.exists():
+            z = np.load(cache_file)
+            self.lat, self.lon, iy, ix, self.mask = z["lat"], z["lon"], z["iy"], z["ix"], z["mask"]
+        else:
+            self.lat, self.lon, iy, ix, self.mask = self._build(geolat.astype(float), geolon.astype(float), max_cells)
+            if cache_file:
+                try:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    np.savez(cache_file, lat=self.lat, lon=self.lon, iy=iy, ix=ix, mask=self.mask)
+                except OSError as e:
+                    log.warning("cannot cache regrid index at %s: %s", cache_file, e)
+        self.IY = xr.DataArray(iy, dims=("lat", "lon"))
+        self.IX = xr.DataArray(ix, dims=("lat", "lon"))
+
+    @staticmethod
+    def _build(gl, gn, max_cells):
+        from scipy.spatial import cKDTree
+        gn180 = ((gn + 180) % 360) - 180
+        straddles_dateline = (np.nanmax(gn180) - np.nanmin(gn180)) > 300
+        if straddles_dateline:
+            gn180 = gn180 % 360   # work in 0..360 so the domain is contiguous
+        dlat = float(np.nanmedian(np.abs(np.diff(gl, axis=0))))
+        dlon = float(np.nanmedian(np.abs(np.diff(gn180, axis=1))))
+        la0, la1 = float(np.nanmin(gl)), float(np.nanmax(gl))
+        lo0, lo1 = float(np.nanmin(gn180)), float(np.nanmax(gn180))
+        n = ((la1 - la0) / dlat) * ((lo1 - lo0) / dlon)
+        if n > max_cells:  # coarsen uniformly to the cap
+            f = (n / max_cells) ** 0.5
+            dlat, dlon = dlat * f, dlon * f
+        lat = np.arange(la0 + dlat / 2, la1, dlat)
+        lon = np.arange(lo0 + dlon / 2, lo1, dlon)
+
+        def xyz(la, lo):
+            la, lo = np.radians(la), np.radians(lo)
+            return np.c_[np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)]
+
+        ok = np.isfinite(gl.ravel()) & np.isfinite(gn.ravel())
+        src_idx = np.flatnonzero(ok)
+        tree = cKDTree(xyz(gl.ravel()[ok], gn180.ravel()[ok]))
+        LA, LO = np.meshgrid(lat, lon, indexing="ij")
+        dist, k = tree.query(xyz(LA.ravel(), LO.ravel()), workers=-1)
+        flat = src_idx[k]
+        iy, ix = np.unravel_index(flat, gl.shape)
+        cell = np.sqrt(dlat ** 2 + dlon ** 2) * np.pi / 180  # ~one target cell, chord units
+        mask = (dist > 1.5 * cell).reshape(LA.shape)       # True = outside the source domain
+        # the viewer prefers 0..360 longitudes; keep -180..180 only when the
+        # domain straddles 0° (so it stays contiguous)
+        if lo1 < 0:
+            lon = lon + 360.0
+        return lat, lon, iy.reshape(LA.shape).astype(np.int32), ix.reshape(LA.shape).astype(np.int32), mask
+
+    def apply(self, da: xr.DataArray, ydim: str, xdim: str) -> xr.DataArray:
+        """Lazy regridded view. Dask's pointwise indexing merges the indexed
+        dims into one chunk per combination of the other dims' chunks, so a
+        4-D (time, level, y, x) array would materialise a whole
+        (time chunk x level chunk) block to pick one level. Build the view
+        per level instead and stack the pieces: selecting a level then only
+        touches that level's (time chunk) block."""
+        extra = [d for d in da.dims if d not in ("time", ydim, xdim)]
+        if extra:
+            d = extra[0]
+            parts = [self.apply(da.isel({d: k}, drop=False), ydim, xdim) for k in range(da.sizes[d])]
+            out = xr.concat(parts, dim=d, coords="minimal", compat="override")
+            order = [x for x in da.dims if x not in (ydim, xdim)] + ["lat", "lon"]
+            return out.transpose(*order)
+        out = da.isel({ydim: self.IY, xdim: self.IX})
+        drop = [c for c in out.coords if c not in ("lat", "lon", "time") and c not in out.dims
+                and set(out[c].dims) & {"lat", "lon"}]
+        return out.drop_vars(drop, errors="ignore").assign_coords(lat=("lat", self.lat), lon=("lon", self.lon))
+
+    def gather(self, native: np.ndarray) -> np.ndarray:
+        """Regrid a loaded native array (..., y, x) -> (..., lat, lon) with
+        the index table (plain NumPy; 100 months take ~0.2 s)."""
+        flat = np.asarray(native, dtype=np.float32).reshape(native.shape[:-2] + (-1,))
+        idx = (self.IY.values * native.shape[-1] + self.IX.values).ravel()
+        out = flat[..., idx].reshape(native.shape[:-2] + self.mask.shape)
+        out[..., self.mask] = np.nan
+        return out
+
+    def masked(self, arr: np.ndarray, lat=None, lon=None) -> np.ndarray:
+        """NaN outside the source domain. `lat`/`lon` (coordinate values of
+        the array's last two dims) select the matching part of the mask for
+        spatial subsets (box extractions)."""
+        arr = np.array(arr, dtype=np.float32, copy=True)
+        m = self.mask
+        if lat is not None and lon is not None and (lat.size, lon.size) != m.shape:
+            iy = np.clip(np.searchsorted(self.lat, lat), 0, self.lat.size - 1)
+            ix = np.clip(np.searchsorted(self.lon, lon), 0, self.lon.size - 1)
+            m = m[np.ix_(iy, ix)]
+        arr[..., m] = np.nan
+        return arr
+
+
+# ---------------------------------------------------------------- base class
 class Source:
     """Common description + access interface. Subclasses fill the fields
     in ``_load()`` (called lazily on first use; ArrayLake needs network)."""
@@ -123,15 +248,20 @@ class Source:
         self.experiments: dict[str, dict] = {}
         self.variables: dict[str, dict] = {}
         self.members: list[str] = []
-        self.levels: list[int] = []           # hPa
+        self.levels: list[float] = []         # in display units (hPa, m, ...)
+        self.level_units: str = "hPa"
+        self.level_label: str = "Pressure level"
         self.ensemble_dim: str | None = None
         self.level_dim: str | None = None
-        self.level_scale: float = 1.0         # native level units -> hPa
+        self.level_scale: float = 1.0         # native level units -> display units
         self.level_chunk: int = 1             # levels per chunk in the store
+        self.time_chunk: int = 1              # time steps per chunk (block cache when > 1)
+        self.wrap: bool = True                # global grid wrapping in longitude
         self.wind: dict = {"sfc": None, "plev": None}
         self.calendar: str = "standard"
         self.grid_text: str = ""
         self.store_text: str = ""
+        self.regridder: Regridder | None = None
         self._loaded = False
         self._lock = threading.RLock()
 
@@ -171,12 +301,16 @@ class Source:
                                                   "plev", "group", "start", "end")}
                           for k, v in self.variables.items()},
             "levels": self.levels,
+            "level_units": self.level_units,
+            "level_label": self.level_label,
             "members": self.members,
             "ensemble": bool(self.ensemble_dim),
             "n_members": len(self.members),
             "wind": {k: list(v) if v else None for k, v in self.wind.items()},
             "calendar": self.calendar,
             "grid": self.grid_text,
+            "wrap": self.wrap,
+            "time_chunk": self.time_chunk,
         }
 
     # -- data access
@@ -184,8 +318,27 @@ class Source:
         """Lazy dataset containing `var` (and lat/lon/time coords)."""
         raise NotImplementedError
 
+    def read_block(self, experiment: str, var: str, t0: int, t1: int, stat: str, member: str | None,
+                   lev: float | None) -> np.ndarray:
+        """Loaded float32 (time, lat, lon) block for time indices t0:t1 of
+        one variable/statistic/level. Generic version goes through the
+        lazy dataset; sources with a cheaper path override it."""
+        ds = self.open(experiment, var)
+        blk = self.level_select(self.reduce(ds[var].isel(time=slice(t0, t1)), stat, member), lev)
+        return self.load(blk).values.astype(np.float32)
+
+    def load(self, da: xr.DataArray) -> xr.DataArray:
+        """Materialise a lazy array (with retries) and apply the regrid mask."""
+        out = _retry(lambda: da.load())
+        if self.regridder is not None and {"lat", "lon"} <= set(out.dims) and out.dims[-2:] == ("lat", "lon"):
+            out = out.copy(data=self.regridder.masked(out.values, out.lat.values, out.lon.values))
+        return out
+
     def download_attrs(self, experiment: str, var: str, include_experiment: bool = True) -> dict:
         """Global attributes to carry into NetCDF/CSV downloads."""
+        return {}
+
+    def experiment_attrs(self, experiment: str) -> dict:
         return {}
 
     # -- helpers shared by the endpoints
@@ -196,29 +349,30 @@ class Source:
             raise KeyError(var)
         return cfg
 
-    def nearest_level(self, plev_hpa: float | None) -> int | None:
-        """The available level (hPa) closest to the request; 500 hPa (or the
-        middle level) when none is given."""
+    def nearest_level(self, lev: float | None) -> float | None:
+        """The available level (display units) closest to the request;
+        500 hPa for pressure levels, the first (surface) level otherwise."""
         if not self.levels:
             return None
-        if plev_hpa is None:
-            return 500 if 500 in self.levels else self.levels[len(self.levels) // 2]
-        return min(self.levels, key=lambda p: abs(p - plev_hpa))
+        if lev is None:
+            return 500 if 500 in self.levels else self.levels[0]
+        return min(self.levels, key=lambda p: abs(p - lev))
 
-    def level_select(self, da: xr.DataArray, plev_hpa: float | None) -> xr.DataArray:
-        """Select one level (given in hPa) on a level-bearing array."""
+    def level_select(self, da: xr.DataArray, lev: float | None) -> xr.DataArray:
+        """Select one level (given in display units) on a level-bearing array."""
         if not self.level_dim or self.level_dim not in da.dims:
             return da
-        target = self.nearest_level(plev_hpa) * self.level_scale
+        target = self.nearest_level(lev) * self.level_scale
         return da.sel({self.level_dim: target}, method="nearest")
 
-    def experiment_attrs(self, experiment: str) -> dict:
-        return {}
-
-    def level_hpa(self, da: xr.DataArray) -> int | None:
-        if self.level_dim and self.level_dim in da.coords:
-            return int(round(float(da[self.level_dim].values) / self.level_scale))
+    def level_value(self, da: xr.DataArray) -> float | None:
+        """The level (display units) an array has been reduced to, or None."""
+        if self.level_dim and self.level_dim in da.coords and da[self.level_dim].ndim == 0:
+            return _nice(float(da[self.level_dim].values) / self.level_scale)
         return None
+
+    def level_text(self, lev: float | None) -> str:
+        return "" if lev is None else f"{self.level_label.lower()} {lev:g} {self.level_units}"
 
     def reduce(self, da: xr.DataArray, stat: str, member: str | None) -> xr.DataArray:
         """Apply the ensemble statistic. Without an ensemble dimension every
@@ -278,18 +432,79 @@ def _var_entry(name: str, attrs: dict, dims, level_dim, group, start, end, overr
     }
 
 
+def _level_info(coord: xr.DataArray) -> tuple[float, str, str]:
+    """(scale to display units, display units, label) for a level coordinate."""
+    u = _norm_units(coord.attrs.get("units", ""))
+    pos = str(coord.attrs.get("positive", "")).lower()
+    if u == "pa":
+        return 100.0, "hPa", "Pressure level"
+    if u in ("hpa", "mb", "mbar", "millibar"):
+        return 1.0, "hPa", "Pressure level"
+    if u in ("m", "meters", "metres", "meter", "metre"):
+        return 1.0, "m", "Height" if pos == "up" or str(coord.name) == "height" else "Depth"
+    if u == "km":
+        return 1.0, "km", "Height" if pos == "up" else "Depth"
+    return 1.0, coord.attrs.get("units", ""), "Level"
+
+
+def _dim_aliases(ds: xr.Dataset, ydim: str, xdim: str) -> dict[str, str]:
+    """Other dimension names that index exactly the same cell centres as
+    (ydim, xdim) — MOM6 writes sea-ice fields on yT/xT with the same
+    coordinate values as the tracer grid's yh/xh."""
+    out = {}
+    for ref in (ydim, xdim):
+        if ref not in ds.coords:
+            continue
+        rv = ds[ref].values
+        for d in ds.dims:
+            if d != ref and d in ds.coords and ds[d].ndim == 1 and ds[d].size == rv.size \
+                    and np.allclose(ds[d].values, rv, atol=1e-6):
+                out[d] = ref
+    return out
+
+
+def _looks_like_level(ds: xr.Dataset, dim: str) -> bool:
+    if dim not in ds.coords or ds[dim].ndim != 1:
+        return False
+    u = _norm_units(ds[dim].attrs.get("units", ""))
+    return u in ("pa", "hpa", "mb", "m", "meters", "metres", "km") or ds[dim].attrs.get("axis") == "Z"
+
+
+def _select_vars(names: list[str], cfg: dict) -> list[str]:
+    """Apply the config's `variables` (whitelist with overrides), `include`
+    (names or regexes) and `max_variables` to the discovered names."""
+    if cfg.get("variables"):
+        missing = [v for v in cfg["variables"] if v not in names]
+        if missing:
+            log.warning("%s: configured variables not found in the store: %s", cfg.get("id"), ", ".join(missing))
+        return [v for v in cfg["variables"] if v in names]
+    inc = cfg.get("include")
+    if inc:
+        pats = [re.compile(f"^{p}$") for p in inc]
+        names = [v for v in names if any(p.match(v) for p in pats)]
+    cap = int(cfg.get("max_variables", 80))
+    if len(names) > cap:
+        log.warning("%s: %d variables discovered; showing the first %d (alphabetical). "
+                    "Set 'variables' or 'include' in datasets.json to choose.", cfg.get("id"), len(names), cap)
+        names = sorted(names)[:cap]
+    return names
+
+
 # ---------------------------------------------------------------- ArrayLake
 class ArrayLakeSource(Source):
-    """``<experiment>/<group>`` Zarr groups in an ArrayLake repo.
+    """Any ArrayLake repo. Config::
 
-    Config::
-        {"id": "spear", "type": "arraylake",
-         "repo": "GFDL/noaa-gfdl-spear-large-ensembles-pds", "branch": "main",
-         "experiments": {"historical": {"start": "1921-01", "end": "2014-12"}, ...},
-         "groups": ["Amon", "Omon"],              # Zarr groups to scan
-         "variables": {"pr": {"label": ..., "group": "Amon", ...}, ...}   # optional overrides;
-                                                  # omit to take every lat/lon variable found
-         "level_chunk": 9}
+        {"id": "cefi", "type": "arraylake", "repo": "NOAA-PMEL/cefi-nwa-hindcast-monthly",
+         "branch": "main",
+         "experiments": {...}, "groups": [...],     # optional: SPEAR-style <experiment>/<group>
+                                                    #   layout with known periods; omitted = discover
+         "variables": {"tos": {"label": "SST"}, ...},   # optional whitelist + overrides
+         "include": ["tos", "so.*"],                # optional: names/regexes (when no whitelist)
+         "max_variables": 80}
+
+    Discovery walks the Zarr hierarchy: each group with ``(time, y, x)``
+    variables is an experiment (named by its path). A 2-D lat/lon grid is
+    regridded to a regular one on the fly.
     """
 
     kind = "arraylake"
@@ -298,80 +513,233 @@ class ArrayLakeSource(Source):
         super().__init__(cfg)
         self.repo = cfg["repo"]
         self.branch = cfg.get("branch", "main")
-        self.groups = cfg.get("groups", ["Amon"])
         self._session = None
-        self._datasets: dict[str, xr.Dataset] = {}
+        self._datasets: dict[str, xr.Dataset] = {}      # native datasets by zarr path
+        self._regridded: dict[str, xr.Dataset] = {}     # regridded single-variable views by "path::var"
+        self._exp_path: dict[str, dict[str, str]] = {}  # experiment -> {group key: zarr path}
+        self._var_group: dict[str, str] = {}            # var -> group key
+        self._hdims: tuple[str, str] | None = None      # native horizontal dims when curvilinear
+        self._dim_alias: dict[str, str] = {}            # e.g. {"yT": "yh", "xT": "xh"}: same cells, other names
         self.store_text = f"arraylake://{self.repo} (branch {self.branch})"
 
-    def _group(self, experiment: str, group: str) -> xr.Dataset:
-        key = f"{experiment}/{group}"
+    # -- store access
+    def _store(self):
         with self._lock:
-            if key not in self._datasets:
-                if self._session is None:
-                    from arraylake import Client
-                    repo = Client().get_repo(self.repo)
-                    self._session = repo.readonly_session(branch=self.branch)
+            if self._session is None:
+                from arraylake import Client
+                repo = _retry(lambda: Client().get_repo(self.repo))
+                self._session = repo.readonly_session(branch=self.branch)
+            return self._session.store
+
+    def _native(self, path: str) -> xr.Dataset:
+        with self._lock:
+            if path not in self._datasets:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    self._datasets[key] = xr.open_zarr(self._session.store, group=key, consolidated=False)
-            return self._datasets[key]
+                    # dask-backed: the regrid view (vectorised indexing) is built
+                    # once per variable and later time/level selections only
+                    # touch the chunks they need. (xarray's own lazy indexing
+                    # would broadcast the index arrays to the full 4-D shape.)
+                    self._datasets[path] = xr.open_zarr(self._store(), group=path or None, consolidated=False,
+                                                        use_cftime=True, decode_timedelta=False)
+            return self._datasets[path]
 
+    def _walk(self, max_depth=3) -> list[str]:
+        """Zarr group paths that look like datasets (have a time dim and a
+        3-D+ data variable)."""
+        import zarr
+        root = zarr.open_group(self._store(), mode="r")
+        found = []
+
+        def visit(g, path, depth):
+            if list(g.array_keys()):
+                try:
+                    ds = self._native(path)
+                    if "time" in ds.dims and any(da.ndim >= 3 for da in ds.data_vars.values()):
+                        found.append(path)
+                        return
+                except Exception as e:  # noqa: BLE001
+                    log.debug("%s: cannot open %r: %s", self.id, path, e)
+            if depth < max_depth:
+                for k in g.group_keys():
+                    visit(g[k], f"{path}/{k}" if path else k, depth + 1)
+
+        visit(root, "", 0)
+        return found
+
+    # -- discovery
     def _load(self):
-        self.experiments = {}
-        exps = self.cfg.get("experiments") or {}
-        overrides = self.cfg.get("variables")
-        first_exp = next(iter(exps))
-        for name, rng in exps.items():
-            attrs = self._group(name, self.groups[0]).attrs
-            desc = attrs.get("experiment", name)
-            forcing = attrs.get("forcing", "")
-            self.experiments[name] = {**rng, "long": f"{desc}" + (f" — forcing: {forcing}" if forcing else "")}
-        # variables: every (time, lat, lon) data variable in the listed groups
-        for group in self.groups:
-            ds = self._group(first_exp, group)
+        cfg = self.cfg
+        overrides = cfg.get("variables") or {}
+        if cfg.get("experiments"):
+            groups = cfg.get("groups", ["Amon"])
+            for name, rng in cfg["experiments"].items():
+                self._exp_path[name] = {g: f"{name}/{g}" for g in groups}
+                attrs = self._native(f"{name}/{groups[0]}").attrs
+                desc = attrs.get("experiment", name)
+                forcing = attrs.get("forcing", "")
+                self.experiments[name] = {**rng, "long": f"{desc}" + (f" — forcing: {forcing}" if forcing else "")}
+        else:
+            paths = self._walk()
+            if not paths:
+                raise RuntimeError(f"no (time, y, x) datasets found in {self.repo}")
+            for p in paths:
+                ds = self._native(p)
+                name = p or "root"
+                t = ds.time.values
+                self.experiments[name] = {"start": _ym(t[0]), "end": _ym(t[-1]),
+                                          "short": p.split("/")[-1] if p else "root",
+                                          "long": str(ds.attrs.get("title") or ds.attrs.get("experiment") or name)}
+                self._exp_path[name] = {"": p}
+        first_exp = next(iter(self.experiments))
+        first_paths = self._exp_path[first_exp]
+
+        # grid, levels, ensemble, variables: from the first experiment's groups
+        discovered: dict[str, tuple[str, dict, tuple]] = {}   # var -> (group key, attrs, dims)
+        for gkey, path in first_paths.items():
+            ds = self._native(path)
+            hd = self._horizontal(ds)
+            if hd is None:
+                log.warning("%s: group %r has no recognisable lat/lon grid; skipped", self.id, path)
+                continue
+            ydim, xdim, regrid = hd
+            if regrid is not None and self.regridder is None:
+                self.regridder = regrid
+                self._hdims = (ydim, xdim)
+                self.wrap = False
+            aliases = _dim_aliases(ds, ydim, xdim)
+            self._dim_alias.update(aliases)
+            # first pass: classify every plain (time[, level][, member], y, x) field
+            fields = {}
             for v, da in ds.data_vars.items():
-                if not {"lat", "lon"} <= set(da.dims) or "time" not in da.dims:
+                dims = tuple(aliases.get(d, d) for d in da.dims)
+                if "time" not in dims or dims[-2:] != (ydim, xdim):
                     continue
-                if overrides is not None and v not in overrides:
+                extra = [d for d in dims if d not in ("time", ydim, xdim)]
+                lev = next((d for d in extra if d in LEVEL_DIMS or _looks_like_level(ds, d)), None)
+                ens = next((d for d in extra if d in ENSEMBLE_DIMS or d.startswith(("member", "ens"))), None)
+                if [d for d in extra if d not in (lev, ens)]:
+                    continue  # ice categories, bounds, ...: not a plain field
+                fields[v] = (da, lev, ens)
+            # one level axis per dataset: the one most variables use (named
+            # level dims first), e.g. MOM6's z_l rather than the interface zi
+            counts = {}
+            for da, lev, _ in fields.values():
+                if lev:
+                    counts[lev] = counts.get(lev, 0) + 1
+            if counts and not self.level_dim:
+                best = max(counts, key=lambda d: (d in LEVEL_DIMS, counts[d]))
+                self.level_dim = best
+                self.level_scale, self.level_units, self.level_label = _level_info(ds[best])
+                self.levels = [_nice(float(p) / self.level_scale) for p in ds[best].values.tolist()]
+                skipped = [d for d in counts if d != best]
+                if skipped:
+                    log.info("%s: level axis %r (%d vars); variables on %s are not shown",
+                             self.id, best, counts[best], ", ".join(f"{d!r} ({counts[d]})" for d in skipped))
+            for v, (da, lev, ens) in fields.items():
+                if lev and lev != self.level_dim:
                     continue
-                if self.ensemble_dim is None:
-                    extra = [d for d in da.dims if d not in AUX_DIMS and d not in LEVEL_DIMS]
-                    if extra:
-                        self.ensemble_dim = extra[0]
-                lev = next((d for d in da.dims if d in LEVEL_DIMS), None)
-                if lev and not self.level_dim:
-                    self.level_dim = lev
-                    lu = _norm_units(ds[lev].attrs.get("units", "Pa"))
-                    self.level_scale = 100.0 if lu == "pa" else 1.0
-                    self.levels = [int(round(float(p) / self.level_scale)) for p in ds[lev].values.tolist()]
+                if lev and self.level_chunk == 1:
                     try:
-                        self.level_chunk = int(da.chunksizes[lev][0])
+                        self.level_chunk = int(da.encoding.get("chunks", [1] * da.ndim)[list(da.dims).index(lev)])
                     except Exception:  # noqa: BLE001
-                        self.level_chunk = 1
-                rng = exps[first_exp]
-                self.variables[v] = _var_entry(v, da.attrs, da.dims, lev, group,
-                                               min(e["start"] for e in exps.values()),
-                                               max(e["end"] for e in exps.values()),
-                                               (overrides or {}).get(v))
-        if overrides:  # keep the configured order
-            self.variables = {k: self.variables[k] for k in overrides if k in self.variables}
+                        pass
+                if ens and not self.ensemble_dim:
+                    self.ensemble_dim = ens
+                if self.time_chunk == 1:
+                    try:
+                        self.time_chunk = int(da.encoding.get("chunks", [1])[list(da.dims).index("time")])
+                    except Exception:  # noqa: BLE001
+                        pass
+                discovered[v] = (gkey, dict(da.attrs), da.dims)
+        keep = _select_vars(list(discovered), cfg)
+        if not keep:
+            raise RuntimeError(f"{self.repo}: no displayable (time, y, x) variables")
+        rng_start = min(e["start"] for e in self.experiments.values())
+        rng_end = max(e["end"] for e in self.experiments.values())
+        for v in keep:
+            gkey, attrs, dims = discovered[v]
+            self._var_group[v] = gkey
+            self.variables[v] = _var_entry(v, attrs, dims, self.level_dim, gkey or self._realm(first_paths[gkey]),
+                                           rng_start, rng_end, overrides.get(v))
         if self.ensemble_dim:
-            ds = self._group(first_exp, self.groups[0])
+            ds = self._native(first_paths[self._var_group[keep[0]]])
             ids = [str(m) for m in ds[self.ensemble_dim].values]
+
             def _key(m):
                 mm = re.match(r"r(\d+)", m)
                 return int(mm.group(1)) if mm else m
             self.members = sorted(ids, key=_key)
-        self.level_chunk = int(self.cfg.get("level_chunk", self.level_chunk))
-        ds = self._group(first_exp, self.groups[0])
+        self.level_chunk = int(cfg.get("level_chunk", self.level_chunk))
+        ds = self._native(first_paths[self._var_group[keep[0]]])
         self.calendar = str(ds.time.encoding.get("calendar", ds.time.attrs.get("calendar", "standard")))
-        self.grid_text = self.cfg.get("grid") or _grid_text(ds)
+        if not cfg.get("title"):
+            self.title = str(ds.attrs.get("title") or self.id)
+        self._loaded = True  # open() below needs the tables filled
+        self.grid_text = cfg.get("grid") or _grid_text(self.open(first_exp, keep[0]), self.wrap)
 
+    def _realm(self, path: str) -> str:
+        a = self._native(path).attrs
+        return str(a.get("modeling_realm") or a.get("realm")
+                   or ("ocean" if any(k.startswith("cefi") for k in a) else ""))
+
+    def _horizontal(self, ds: xr.Dataset):
+        """(ydim, xdim, Regridder|None) for a dataset's horizontal grid."""
+        if "lat" in ds.dims and "lon" in ds.dims and ds.lat.ndim == 1:
+            return "lat", "lon", None
+        if "latitude" in ds.dims and "longitude" in ds.dims:
+            return "latitude", "longitude", None
+        for la, lo in LATLON_2D:
+            if la in ds.variables and lo in ds.variables and ds[la].ndim == 2:
+                ydim, xdim = ds[la].dims
+                key = hashlib.md5(f"{self.repo}:{self.branch}:{la}:{ds[la].shape}".encode()).hexdigest()[:12]
+                cache = INDEX_DIR / f"{self.id}_{key}.npz"
+                log.info("%s: curvilinear %s x %s grid — nearest-neighbour regrid index%s",
+                         self.id, ds[la].shape[0], ds[la].shape[1], " (cached)" if cache.exists() else " (building)")
+                return ydim, xdim, Regridder(ds[la].values, ds[lo].values, cache)
+        return None
+
+    # -- access
     def open(self, experiment, var):
         self.ensure()
         if experiment not in self.experiments:
             raise KeyError(experiment)
-        return self._group(experiment, self.var_cfg(var)["group"])
+        self.var_cfg(var)
+        gkey = self._var_group[var]
+        path = self._exp_path[experiment][gkey]
+        if self.regridder is None:
+            ds = self._native(path)
+            if "latitude" in ds.dims:
+                ds = ds.rename({"latitude": "lat", "longitude": "lon"})
+            return _normalise_grid(ds)
+        key = f"{path}::{var}"
+        with self._lock:
+            if key not in self._regridded:
+                # one variable per view, built on first use (a few seconds each)
+                ds = self._native(path)
+                ydim, xdim = self._hdims
+                da = ds[var]
+                ren = {d: self._dim_alias[d] for d in da.dims if d in self._dim_alias}
+                if ren:  # e.g. sea-ice fields on yT/xT: same cells as yh/xh
+                    da = da.rename(ren).drop_vars(list(ren), errors="ignore")
+                self._regridded[key] = xr.Dataset({var: self.regridder.apply(da, ydim, xdim)},
+                                                  attrs=dict(ds.attrs))
+            return self._regridded[key]
+
+    def read_block(self, experiment, var, t0, t1, stat, member, lev):
+        if self.regridder is None:
+            return super().read_block(experiment, var, t0, t1, stat, member, lev)
+        # Read the native chunks for this time slab and level as a plain array
+        # (dask only slices chunks here: no vectorised gather in the graph),
+        # then regrid with the index table in NumPy.
+        ds = self._native(self._exp_path[experiment][self._var_group[var]])
+        da = ds[var]
+        ren = {d: self._dim_alias[d] for d in da.dims if d in self._dim_alias}
+        if ren:
+            da = da.rename(ren).drop_vars(list(ren), errors="ignore")
+        blk = self.level_select(self.reduce(da.isel(time=slice(t0, t1)), stat, member), lev)
+        native = _retry(lambda: blk.values)
+        return self.regridder.gather(native)
 
     # Original store attributes worth carrying into downloads. Member-specific
     # keys (realization, tracking_id, per-file history, creation_date) are
@@ -381,18 +749,25 @@ class ArrayLakeSource(Source):
         "Conventions", "institution", "institute_id", "model_id", "modeling_realm",
         "product", "project_id", "source", "references", "license", "contact",
         "table_id", "initialization_method", "physics_version", "external_variables",
+        "title", "cefi_experiment_name", "cefi_experiment_type", "cefi_region", "cefi_grid_type",
+        "cefi_data_doi", "cefi_archive_version", "cefi_date_range",
     ]
     EXPERIMENT_LEVEL_KEYS = [
         "experiment", "experiment_id", "forcing", "branch_method", "parent_experiment_id",
     ]
 
     def download_attrs(self, experiment, var, include_experiment=True):
-        ds = self.open(experiment, var)
+        ds = self._native(self._exp_path[experiment][self._var_group[var]])
         keys = self.MODEL_LEVEL_KEYS + (self.EXPERIMENT_LEVEL_KEYS if include_experiment else [])
-        return {k: ds.attrs[k] for k in keys if k in ds.attrs}
+        out = {k: ds.attrs[k] for k in keys if k in ds.attrs}
+        if self.regridder is not None:
+            out["regridding"] = ("nearest-neighbour from the native curvilinear grid to a regular "
+                                 f"{self.regridder.lat.size} x {self.regridder.lon.size} lat/lon grid by the viewer")
+        return out
 
     def experiment_attrs(self, experiment: str) -> dict:
-        return dict(self._group(experiment, self.groups[0]).attrs)
+        path = next(iter(self._exp_path[experiment].values()))
+        return dict(self._native(path).attrs)
 
 
 # ---------------------------------------------------------------- local catalog
@@ -451,8 +826,11 @@ class CatalogSource(Source):
             if lev and not self.level_dim:
                 self.level_dim = lev
                 lu = _norm_units(v.get("level_units") or "hPa")
-                self.level_scale = 100.0 if lu == "pa" else 1.0
-                self.levels = [int(round(float(p) / self.level_scale)) for p in (v.get("levels") or [])]
+                self.level_scale, self.level_units, self.level_label = (
+                    (100.0, "hPa", "Pressure level") if lu == "pa" else
+                    (1.0, "hPa", "Pressure level") if lu in ("hpa", "mb") else
+                    (1.0, v.get("level_units") or "", "Level"))
+                self.levels = [_nice(float(p) / self.level_scale) for p in (v.get("levels") or [])]
             extra = [d for d in v["dims"] if d not in AUX_DIMS and d not in LEVEL_DIMS]
             if extra and not self.ensemble_dim:
                 self.ensemble_dim = extra[0]
@@ -467,11 +845,12 @@ class CatalogSource(Source):
             first = next(iter(cat["variables"]))
             self.members = [str(m) for m in self._group(first)[self.ensemble_dim].values]
         g = cat.get("grid") or {}
+        self.wrap = bool((g.get("lon_max", 360) - g.get("lon_min", 0)) + (g.get("dlon") or 0) >= 359.5)
         self.grid_text = (f"{g.get('nlat')} lat x {g.get('nlon')} lon"
                           + (f" ({g['dlat']:.3g} x {g['dlon']:.3g} deg)" if g.get("dlat") and g.get("dlon") else "")
-                          + ", longitudes 0-360")
+                          + (", longitudes 0-360" if self.wrap else ", regional"))
         exp_id = self.cfg.get("experiment_id", self.id)
-        self.experiments = {exp_id: {"start": min(starts), "end": max(ends),
+        self.experiments = {exp_id: {"start": min(starts), "end": max(ends), "short": self.title,
                                      "long": self.title + (f" — {self.description}" if self.description else "")}}
 
     def open(self, experiment, var):
@@ -491,7 +870,8 @@ class CatalogSource(Source):
 
 
 def _normalise_grid(ds: xr.Dataset) -> xr.Dataset:
-    """Ascending lat, 0..360 lon, 'lat'/'lon' names — what the endpoints assume."""
+    """Ascending lat, 0..360 lon (unless the domain straddles 0°),
+    'lat'/'lon' names — what the endpoints assume."""
     ren = {}
     for a, b in (("latitude", "lat"), ("longitude", "lon")):
         if a in ds.dims and b not in ds.dims:
@@ -501,17 +881,20 @@ def _normalise_grid(ds: xr.Dataset) -> xr.Dataset:
     if ds.lat.size > 1 and float(ds.lat[0]) > float(ds.lat[-1]):
         ds = ds.isel(lat=slice(None, None, -1))
     lon = ds.lon.values.astype(float)
-    if lon.min() < 0:
+    straddles_zero = lon.min() < 0 <= lon.max() and (lon.max() - lon.min()) < 300
+    if lon.min() < 0 and not straddles_zero:
         ds = ds.assign_coords(lon=(lon % 360)).sortby("lon")
     return ds
 
 
-def _grid_text(ds: xr.Dataset) -> str:
+def _grid_text(ds: xr.Dataset, wrap: bool = True) -> str:
     lat = ds.lat.values.astype(float)
     lon = ds.lon.values.astype(float)
     dlat = abs(lat[1] - lat[0]) if lat.size > 1 else 0
     dlon = abs(lon[1] - lon[0]) if lon.size > 1 else 0
-    return f"{lat.size} lat x {lon.size} lon ({dlat:.3g} x {dlon:.3g} deg), longitudes 0-360"
+    span = ("longitudes 0-360" if wrap
+            else f"regional: lat {lat.min():.2f}..{lat.max():.2f}, lon {((lon.min() + 180) % 360) - 180:.2f}..{((lon.max() + 180) % 360) - 180:.2f}")
+    return f"{lat.size} lat x {lon.size} lon ({dlat:.3g} x {dlon:.3g} deg), {span}"
 
 
 # ---------------------------------------------------------------- registry
