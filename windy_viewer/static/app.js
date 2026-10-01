@@ -2611,7 +2611,8 @@ async function init() {
         .join("\n")
     );
   };
-  for (const [id, side] of [["month-info-a", "a"], ["month-info-b", "b"]]) {
+  // the same mark in the box card: its range follows selection A's scenario
+  for (const [id, side] of [["month-info-a", "a"], ["month-info-b", "b"], ["box-month-info", "a"]]) {
     el(id).addEventListener("click", (e) => {
       e.stopPropagation();
       showInfoPopover(monthInfoText(side), e.clientX, e.clientY);
