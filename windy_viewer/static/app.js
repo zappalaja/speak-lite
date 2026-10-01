@@ -154,9 +154,59 @@ const VAR_CONFIG = {
 const RAMPS = {
   thermal: [[135, 68, 153], [57, 97, 207], [85, 195, 205], [116, 208, 140],
             [228, 205, 66], [231, 153, 53], [200, 50, 68]],
-  plasma: [[13, 8, 135], [126, 3, 168], [203, 71, 119], [248, 149, 64], [240, 249, 33]],
   blues: [[25, 35, 80], [24, 79, 149], [57, 135, 229], [122, 184, 240], [205, 226, 251]],
+  // user-selectable alternatives: matplotlib colormaps sampled at 17 points
+  viridis: [[68, 1, 84], [72, 24, 106], [71, 45, 123], [66, 64, 134], [59, 82, 139], [51, 99, 141], [44, 114, 142], [38, 130, 142], [33, 145, 140], [31, 160, 136], [40, 174, 128], [63, 188, 115], [94, 201, 98], [132, 212, 75], [173, 220, 48], [216, 226, 25], [253, 231, 37]],
+  plasma: [[13, 8, 135], [49, 5, 151], [76, 2, 161], [102, 0, 167], [126, 3, 168], [149, 17, 161], [170, 35, 149], [188, 53, 135], [204, 71, 120], [218, 90, 106], [230, 108, 92], [240, 128, 78], [248, 149, 64], [253, 172, 51], [253, 197, 39], [248, 223, 37], [240, 249, 33]],
+  inferno: [[0, 0, 4], [11, 7, 36], [33, 12, 74], [61, 9, 101], [87, 16, 110], [113, 25, 110], [138, 34, 106], [163, 44, 97], [188, 55, 84], [210, 70, 68], [228, 90, 49], [241, 115, 29], [249, 142, 9], [252, 172, 17], [249, 203, 53], [242, 234, 105], [252, 255, 164]],
+  magma: [[0, 0, 4], [10, 8, 34], [29, 17, 71], [54, 16, 107], [81, 18, 124], [106, 28, 129], [131, 38, 129], [156, 46, 127], [183, 55, 121], [208, 65, 111], [231, 82, 99], [245, 107, 92], [252, 137, 97], [254, 167, 114], [254, 196, 136], [253, 226, 163], [252, 253, 191]],
+  cividis: [[0, 34, 78], [0, 46, 106], [26, 56, 111], [50, 67, 109], [67, 78, 108], [83, 90, 109], [97, 101, 111], [111, 112, 115], [125, 124, 120], [140, 136, 120], [155, 148, 118], [171, 160, 114], [188, 174, 108], [205, 187, 99], [222, 201, 88], [240, 216, 70], [254, 232, 56]],
+  turbo: [[48, 18, 59], [64, 64, 162], [70, 107, 227], [66, 148, 255], [40, 188, 235], [24, 221, 194], [50, 242, 152], [109, 254, 98], [164, 252, 60], [205, 236, 52], [238, 207, 58], [253, 172, 52], [251, 126, 33], [235, 80, 14], [208, 47, 5], [169, 22, 1], [122, 4, 3]],
+  ylorrd: [[255, 255, 204], [255, 246, 182], [255, 237, 160], [254, 227, 139], [254, 217, 118], [254, 197, 97], [254, 178, 76], [253, 159, 68], [253, 140, 60], [252, 108, 51], [252, 77, 42], [239, 51, 35], [226, 25, 28], [207, 12, 33], [187, 0, 38], [157, 0, 38], [128, 0, 38]],
+  ylgnbu: [[255, 255, 217], [246, 251, 197], [237, 248, 177], [218, 240, 179], [198, 233, 180], [162, 219, 184], [126, 205, 187], [95, 193, 192], [64, 181, 196], [46, 163, 194], [29, 144, 192], [32, 118, 179], [34, 93, 168], [36, 72, 157], [36, 51, 146], [22, 40, 116], [8, 29, 88]],
+  gnbu: [[247, 252, 240], [235, 247, 229], [224, 243, 219], [214, 239, 208], [204, 235, 197], [186, 228, 189], [167, 221, 181], [145, 212, 189], [122, 204, 196], [100, 191, 204], [77, 178, 211], [60, 159, 200], [42, 139, 190], [25, 121, 181], [8, 103, 171], [8, 83, 149], [8, 64, 129]],
+  greens: [[247, 252, 245], [238, 248, 234], [229, 245, 224], [214, 239, 208], [199, 233, 192], [180, 225, 173], [160, 217, 155], [138, 206, 136], [115, 196, 118], [90, 183, 105], [64, 170, 93], [49, 154, 80], [34, 138, 68], [17, 123, 56], [0, 108, 44], [0, 87, 35], [0, 68, 27]],
+  oranges: [[255, 245, 235], [254, 237, 220], [254, 230, 206], [253, 219, 184], [253, 208, 162], [253, 191, 134], [253, 174, 106], [253, 157, 83], [253, 140, 59], [247, 122, 39], [241, 104, 19], [228, 88, 10], [216, 72, 1], [190, 63, 2], [165, 54, 3], [145, 46, 4], [127, 39, 4]],
+  reds: [[255, 245, 240], [254, 234, 225], [254, 224, 210], [253, 205, 185], [252, 187, 161], [252, 166, 137], [252, 146, 114], [251, 125, 93], [251, 105, 74], [245, 82, 58], [238, 58, 44], [220, 41, 36], [202, 24, 29], [183, 19, 25], [163, 15, 21], [132, 7, 17], [103, 0, 13]],
+  purples: [[252, 251, 253], [245, 244, 249], [239, 237, 245], [228, 227, 240], [218, 218, 235], [203, 203, 227], [188, 189, 220], [173, 171, 210], [158, 154, 200], [142, 139, 193], [128, 124, 186], [117, 102, 174], [105, 80, 163], [94, 59, 152], [83, 38, 143], [73, 18, 133], [63, 0, 125]],
+  bluesmpl: [[247, 251, 255], [234, 243, 251], [222, 235, 247], [210, 227, 243], [198, 219, 239], [178, 210, 232], [157, 202, 225], [132, 188, 219], [106, 174, 214], [86, 160, 206], [65, 145, 198], [49, 129, 189], [32, 112, 180], [20, 96, 168], [8, 80, 155], [8, 64, 130], [8, 48, 107]],
+  hot: [[11, 0, 0], [53, 0, 0], [95, 0, 0], [137, 0, 0], [179, 0, 0], [221, 0, 0], [255, 8, 0], [255, 50, 0], [255, 92, 0], [255, 134, 0], [255, 176, 0], [255, 218, 0], [255, 255, 7], [255, 255, 70], [255, 255, 133], [255, 255, 196], [255, 255, 255]],
+  jet: [[0, 0, 128], [0, 0, 200], [0, 0, 255], [0, 64, 255], [0, 128, 255], [0, 192, 255], [22, 255, 225], [73, 255, 173], [125, 255, 122], [177, 255, 70], [228, 255, 19], [255, 208, 0], [255, 148, 0], [255, 89, 0], [255, 30, 0], [196, 0, 0], [128, 0, 0]],
+  rainbow: [[128, 0, 255], [96, 50, 254], [64, 98, 250], [32, 142, 244], [0, 181, 235], [32, 213, 225], [64, 236, 212], [96, 250, 197], [128, 255, 180], [160, 250, 161], [192, 235, 141], [224, 211, 119], [255, 179, 96], [255, 140, 73], [255, 95, 48], [255, 47, 24], [255, 0, 0]],
+  ocean: [[0, 128, 0], [0, 104, 16], [0, 80, 32], [0, 56, 48], [0, 32, 64], [0, 8, 80], [0, 16, 96], [0, 40, 112], [0, 64, 128], [0, 88, 144], [0, 112, 160], [18, 136, 176], [66, 160, 192], [114, 185, 208], [162, 208, 224], [210, 232, 240], [255, 255, 255]],
+  terrain: [[51, 51, 153], [30, 94, 196], [8, 136, 238], [0, 172, 196], [1, 204, 102], [65, 217, 115], [129, 230, 128], [193, 243, 141], [254, 254, 152], [222, 213, 135], [190, 172, 118], [158, 131, 101], [129, 94, 86], [161, 135, 129], [193, 176, 172], [225, 217, 215], [255, 255, 255]],
+  gistearth: [[0, 0, 0], [11, 21, 117], [21, 57, 120], [32, 89, 123], [43, 115, 126], [52, 133, 118], [59, 142, 98], [67, 151, 79], [94, 160, 75], [127, 168, 83], [153, 175, 88], [180, 182, 93], [189, 171, 98], [200, 167, 121], [218, 183, 160], [236, 211, 206], [253, 251, 251]],
+  cubehelix: [[0, 0, 0], [21, 11, 29], [27, 30, 59], [23, 55, 77], [22, 83, 76], [35, 106, 62], [68, 119, 49], [114, 123, 50], [161, 121, 74], [197, 122, 118], [212, 132, 169], [209, 152, 212], [198, 180, 238], [193, 209, 243], [203, 232, 240], [227, 246, 240], [255, 255, 255]],
+  twilight: [[226, 217, 226], [196, 206, 212], [149, 181, 199], [114, 151, 193], [98, 118, 186], [94, 81, 173], [89, 42, 143], [69, 19, 92], [47, 20, 54], [74, 19, 66], [116, 30, 79], [152, 53, 80], [178, 86, 82], [194, 124, 99], [204, 163, 137], [216, 199, 190], [226, 217, 226]],
+  rdbu: [[5, 48, 97], [23, 82, 144], [42, 113, 178], [63, 142, 192], [107, 172, 209], [155, 201, 224], [194, 221, 236], [224, 236, 243], [247, 246, 246], [251, 229, 216], [251, 204, 180], [245, 170, 137], [228, 128, 102], [208, 85, 72], [186, 40, 50], [147, 14, 38], [103, 0, 31]],
+  coolwarm: [[59, 76, 192], [78, 104, 216], [98, 130, 234], [119, 154, 247], [141, 176, 254], [163, 194, 254], [185, 208, 249], [204, 217, 237], [221, 220, 220], [236, 211, 197], [245, 196, 172], [247, 176, 147], [244, 152, 122], [235, 125, 98], [221, 95, 75], [202, 59, 55], [180, 4, 38]],
+  bwr: [[0, 0, 255], [32, 32, 255], [64, 64, 255], [96, 96, 255], [128, 128, 255], [160, 160, 255], [192, 192, 255], [224, 224, 255], [255, 254, 254], [255, 222, 222], [255, 190, 190], [255, 158, 158], [255, 126, 126], [255, 94, 94], [255, 62, 62], [255, 30, 30], [255, 0, 0]],
+  seismic: [[0, 0, 76], [0, 0, 121], [0, 0, 166], [0, 0, 211], [1, 1, 255], [65, 65, 255], [129, 129, 255], [193, 193, 255], [255, 253, 253], [255, 189, 189], [255, 125, 125], [255, 61, 61], [254, 0, 0], [222, 0, 0], [190, 0, 0], [158, 0, 0], [128, 0, 0]],
+  rdylbu: [[49, 54, 149], [62, 94, 168], [81, 131, 187], [110, 166, 206], [144, 195, 221], [178, 221, 235], [212, 237, 244], [236, 248, 226], [255, 254, 190], [254, 235, 161], [254, 210, 131], [253, 179, 102], [248, 140, 81], [239, 99, 63], [221, 61, 45], [194, 28, 39], [165, 0, 38]],
+  rdylgn: [[0, 104, 55], [16, 134, 71], [45, 161, 85], [93, 185, 97], [135, 203, 103], [173, 220, 111], [205, 234, 131], [232, 245, 159], [255, 254, 190], [254, 235, 157], [254, 210, 127], [253, 179, 101], [248, 140, 81], [239, 99, 63], [221, 61, 45], [194, 28, 39], [165, 0, 38]],
+  brbg: [[84, 48, 5], [119, 69, 8], [153, 93, 19], [185, 123, 41], [207, 162, 86], [226, 199, 135], [241, 223, 179], [246, 237, 215], [244, 245, 245], [215, 238, 235], [180, 226, 219], [135, 208, 197], [88, 176, 167], [45, 143, 135], [12, 113, 105], [1, 85, 75], [0, 60, 48]],
+  puor: [[45, 0, 75], [69, 24, 113], [95, 58, 145], [123, 106, 168], [153, 144, 191], [183, 177, 213], [207, 207, 229], [228, 229, 240], [247, 247, 246], [252, 232, 205], [254, 213, 159], [253, 188, 107], [238, 155, 57], [217, 123, 18], [189, 97, 9], [158, 76, 7], [127, 59, 8]],
+  piyg: [[142, 1, 82], [177, 17, 109], [203, 50, 137], [219, 108, 168], [232, 151, 196], [243, 188, 221], [250, 214, 234], [251, 233, 242], [247, 247, 246], [236, 246, 222], [217, 240, 188], [189, 227, 141], [154, 205, 97], [119, 181, 60], [88, 155, 40], [61, 127, 30], [39, 100, 25]],
+  prgn: [[64, 0, 75], [98, 26, 110], [127, 60, 141], [149, 104, 166], [174, 139, 189], [199, 171, 210], [222, 201, 226], [237, 226, 238], [246, 247, 246], [228, 242, 224], [203, 234, 197], [171, 221, 165], [126, 195, 127], [80, 166, 90], [41, 132, 64], [16, 99, 43], [0, 68, 27]],
+  spectral: [[94, 79, 162], [66, 115, 179], [63, 151, 183], [96, 187, 168], [137, 208, 164], [179, 224, 162], [216, 239, 155], [240, 249, 167], [255, 254, 190], [254, 235, 157], [254, 210, 127], [253, 179, 101], [248, 140, 81], [239, 102, 69], [220, 72, 76], [190, 37, 74], [158, 1, 66]],
 };
+
+// Colour-scale choices offered by the legend's picker. "default" keeps the
+// per-variable scale (Windy-style ramps, or the auto ramp for dynamic
+// fields); any other entry recolours the same value range.
+const CMAP_CHOICES = {
+  seq: [["default", "Default"], ["viridis", "Viridis"], ["plasma", "Plasma"], ["inferno", "Inferno"], ["magma", "Magma"], ["cividis", "Cividis"], ["turbo", "Turbo"], ["ylorrd", "Yellow–Red"], ["ylgnbu", "Yellow–Blue"], ["gnbu", "Green–Blue"], ["greens", "Greens"], ["oranges", "Oranges"], ["reds", "Reds"], ["purples", "Purples"], ["bluesmpl", "Blues"], ["hot", "Hot"], ["jet", "Jet"], ["rainbow", "Rainbow"], ["ocean", "Ocean"], ["terrain", "Terrain"], ["gistearth", "Earth"], ["cubehelix", "Cubehelix"], ["twilight", "Twilight"]],
+  div: [["default", "Default"], ["rdbu", "Blue–Red"], ["coolwarm", "Cool–Warm"], ["bwr", "Blue–White–Red"], ["seismic", "Seismic"], ["rdylbu", "Blue–Yellow–Red"], ["rdylgn", "Green–Yellow–Red"], ["brbg", "Brown–Green"], ["puor", "Orange–Purple"], ["piyg", "Pink–Green"], ["prgn", "Purple–Green"], ["spectral", "Spectral"]],
+};
+// The choice is remembered per variable (like the display unit): switching
+// variables shows each one's own default unless you changed it before.
+function cmapOverride(kind, varName = state.var) {
+  const id = state.cmap && state.cmap[kind] && state.cmap[kind][varName];
+  return id && id !== "default" && RAMPS[id] ? id : null;
+}
+function cmapChoice(kind, varName = state.var) {
+  return cmapOverride(kind, varName) || "default";
+}
 
 // Display-unit options per variable. Data stays in base units everywhere
 // (colormaps are keyed to physical values, so the raster never re-renders);
@@ -322,20 +372,31 @@ function colormap(stops, v, out) {
 
 // Precomputed color lookup tables make the 2M-pixel raster render fast
 // enough to not freeze the UI (a per-pixel stop search is ~20x slower).
+// Colour function for a fixed-stop variable: the variable's own stops, or
+// the chosen ramp over the same value range (transparency of the original
+// stops kept, e.g. zero precipitation stays see-through).
+function fixedColorFn(stops) {
+  const ov = cmapOverride("seq");
+  if (!ov) return (v, out) => colormap(stops, v, out);
+  const min = stops[0].v, max = stops[stops.length - 1].v;
+  const tmp = [0, 0, 0, 0];
+  return (v, out) => {
+    colormap(stops, v, tmp);
+    if (tmp[3] === 0 && (v == null || Number.isNaN(v))) { out[3] = 0; return out; }
+    rampColor(ov, (v - min) / (max - min), 1, out);
+    out[3] = tmp[3];
+    return out;
+  };
+}
+
 const lutCache = {};
 function buildLUT(varName) {
-  if (lutCache[varName]) return lutCache[varName];
+  const key = `${varName}|${cmapOverride("seq") || "default"}`;
+  if (lutCache[key]) return lutCache[key];
   const stops = varConfigFor(varName).stops;
-  const N = 1024;
   const min = stops[0].v;
   const max = stops[stops.length - 1].v;
-  const data = new Uint8ClampedArray(N * 4);
-  const rgba = [0, 0, 0, 0];
-  for (let i = 0; i < N; i++) {
-    colormap(stops, min + ((max - min) * i) / (N - 1), rgba);
-    data.set(rgba, i * 4);
-  }
-  return (lutCache[varName] = { min, max, scale: (N - 1) / (max - min), last: N - 1, data });
+  return (lutCache[key] = makeLUT(min, max, fixedColorFn(stops)));
 }
 
 // Diverging colormap for compare mode: blue where A < B, red where A > B,
@@ -370,8 +431,23 @@ function makeLUT(min, max, colorFn) {
   return { min, max, scale: (N - 1) / (max - min), last: N - 1, data };
 }
 
+// Colour function for a diverging field (A−B, deviation): the built-in
+// blue/grey/red scale or a chosen diverging ramp, both fading near zero.
+function divColorFn(limit) {
+  const ov = cmapOverride("div");
+  if (!ov) return (v, out) => diffColor(v, limit, out);
+  return (v, out) => {
+    if (v == null || Number.isNaN(v)) { out[3] = 0; return out; }
+    let t = v / limit;
+    if (t > 1) t = 1; else if (t < -1) t = -1;
+    const a = Math.abs(t);
+    rampColor(ov, (t + 1) / 2, a < 0.04 ? (a / 0.04) * 0.15 : 0.15 + ((a - 0.04) / 0.96) * 0.75, out);
+    return out;
+  };
+}
+
 function buildDiffLUT(limit) {
-  return makeLUT(-limit, limit, (v, out) => diffColor(v, limit, out));
+  return makeLUT(-limit, limit, divColorFn(limit));
 }
 
 // ---- dynamic (auto-scaled) colormaps for pressure-level fields
@@ -407,13 +483,14 @@ function buildDynamicLUT(f, cfg) {
     const [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
     const L = niceLimit(Math.max(Math.abs(lo), Math.abs(hi)));
     f._dyn = { min: -L, max: L, limit: L, div: true };
-    return makeLUT(-L, L, (v, out) => diffColor(v, L, out));
+    return makeLUT(-L, L, divColorFn(L));
   }
   let [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
   if (!(hi > lo)) hi = lo + 1;
-  f._dyn = { min: lo, max: hi, ramp: cfg.ramp };
+  const ramp = cmapOverride("seq") || cfg.ramp;
+  f._dyn = { min: lo, max: hi, ramp };
   return makeLUT(lo, hi, (v, out) =>
-    rampColor(cfg.ramp, (v - lo) / (hi - lo), 0.88, out)
+    rampColor(ramp, (v - lo) / (hi - lo), 0.88, out)
   );
 }
 
@@ -494,6 +571,11 @@ const URL_VIEW = (() => {
     if (str("stat_b")) out.b.stat = str("stat_b");
   }
   if (str("unit") && out.var) out.units = { [out.var]: str("unit") };
+  if (out.var && (str("cmap") || str("cmapd"))) {
+    out.cmap = { seq: {}, div: {} };
+    if (str("cmap")) out.cmap.seq[out.var] = str("cmap");
+    if (str("cmapd")) out.cmap.div[out.var] = str("cmapd");
+  }
   if (num("lat") != null && num("lon") != null) out.view = { lat: num("lat"), lon: num("lon"), z: num("z") };
   if (q.get("globe") === "1") out.globe = { open: true, lat0: num("lat"), lon0: num("lon") };
   return out;
@@ -510,6 +592,10 @@ const map = L.map("map", {
   closePopupOnClick: false, // Ctrl+click station placement must not close the readout
   zoomControl: true,
 });
+// Plain "Leaflet" credit in the attribution corner (no flag, no link); the
+// basemap providers' own credits (OpenStreetMap, CARTO, Esri) stay, as
+// their terms require.
+map.attributionControl.setPrefix("Leaflet");
 
 // Never allow zooming out past the point where the world map is shorter
 // than the viewport — that would expose empty void above/below the poles.
@@ -694,6 +780,9 @@ const state = {
     ta: "c", tos: "c", ua: "ms", va: "ms", zg: "m", hus: "kgkg",
     rlut: "wm2", rsut: "wm2", rsdt: "wm2",
   },
+  // colour-scale choices from the legend picker, per variable: for the
+  // plain field ("seq") and for compare / deviation ("div"); absent = default
+  cmap: { seq: {}, div: {} },
   // Display filter in BASE units (null = unbounded); values outside
   // [lo, hi] render transparent. Session-only, reset on variable change.
   filter: { lo: null, hi: null },
@@ -714,7 +803,11 @@ const SAVED = (() => {
   // remembered selection. Only display preferences carry over.
   const base = stored || {};
   const merged = { opacity: base.opacity, particles: base.particles, grat: base.grat,
-                   contours: base.contours, units: { ...(base.units || {}) }, ...URL_VIEW };
+                   contours: base.contours, units: { ...(base.units || {}) }, cmap: base.cmap, ...URL_VIEW };
+  if (URL_VIEW.cmap) {
+    const b = (base.cmap && typeof base.cmap.seq === "object") ? base.cmap : { seq: {}, div: {} };
+    merged.cmap = { seq: { ...b.seq, ...URL_VIEW.cmap.seq }, div: { ...b.div, ...URL_VIEW.cmap.div } };
+  }
   if (URL_VIEW.units) merged.units = { ...(base.units || {}), ...URL_VIEW.units };
   return merged;
 })();
@@ -732,6 +825,8 @@ function syncUrl() {
   q.set("time", el("month-input").value);
   const unit = state.units[state.var];
   if (unit) q.set("unit", unit);
+  if (cmapOverride("seq")) q.set("cmap", cmapOverride("seq"));
+  if (cmapOverride("div")) q.set("cmapd", cmapOverride("div"));
   if (state.compare) {
     q.set("compare", "1");
     if (Object.keys(meta.experiments).length > 1) q.set("exp_b", state.b.experiment);
@@ -779,6 +874,7 @@ function saveState() {
       plev: state.plev,
       b: state.b,
       units: state.units,
+      cmap: state.cmap,
       timeA: el("month-input").value,
       timeB: el("month-input-b").value,
       opacity: el("opacity").value,
@@ -1131,8 +1227,10 @@ function renderLegend(spec) {
   ctx.putImageData(img, 0, 0);
   el("legend-ticks").innerHTML = spec.ticks.map((t) => `<span>${t}</span>`).join("");
   el("legend-units").textContent = `${spec.label} (${spec.units})`;
+  snapLegend = { ticks: spec.ticks.slice(), label: spec.label, units: spec.units };
   updateFilterUI();
 }
+let snapLegend = null; // what the legend shows, for the PNG export's colour bar
 
 // -------------------------------------------------------- value filter
 // state.filter holds base-unit bounds; the legend handles and the numeric
@@ -1878,7 +1976,7 @@ function renderMeta() {
       min: -L,
       max: L,
       ticks: [-L, -L / 2, 0, L / 2, L].map((t) => fmtTick(convDiff(t, spec))),
-      color: (v, out) => diffColor(v, L, out),
+      color: divColorFn(L),
       label: currentDisplay.label,
       units: spec.unit,
     });
@@ -1895,8 +1993,8 @@ function renderMeta() {
       ({ min, max } = f._dyn);
       tickVals = [0, 1, 2, 3, 4].map((i) => min + ((max - min) * i) / 4);
       colorFn = f._dyn.div
-        ? (v, out) => diffColor(v, f._dyn.limit, out)
-        : (v, out) => rampColor(f._dyn.ramp || cfg.ramp, (v - min) / (max - min), 0.88, out);
+        ? divColorFn(f._dyn.limit)
+        : (v, out) => rampColor(cmapOverride("seq") || f._dyn.ramp || cfg.ramp, (v - min) / (max - min), 0.88, out);
     } else {
       min = cfg.legend.min;
       max = cfg.legend.max;
@@ -1904,7 +2002,7 @@ function renderMeta() {
       tickVals = spec.sci
         ? cfg.legend.ticks.filter((_, i) => i % 2 === 0)
         : cfg.legend.ticks;
-      colorFn = (v, out) => colormap(cfg.stops, v, out);
+      colorFn = fixedColorFn(cfg.stops);
     }
     renderLegend({
       min,
@@ -1919,6 +2017,7 @@ function renderMeta() {
       ` · max ${fmtTick(convForDisplay(f, f.vmax, spec))} ${spec.unit}`
     );
   }
+  updateCmapButton();
   if (typeof updateTimeline === "function") updateTimeline();
   refreshReadout();
   contoursUpdate({ noGlobe: true }); // levels follow the legend range / units
@@ -1932,6 +2031,117 @@ function renderMeta() {
   }
   if (typeof globe !== "undefined" && globe.open) globeRender(false);
 }
+
+// ---------------------------------------------------- colour-scale picker
+// A small button by the legend opens a list of swatches; the choice
+// recolours the current field (same value range), the globe and later
+// loads, and is remembered / mirrored into the URL (cmap, cmapd).
+function cmapKindNow() {
+  const d = currentDisplay;
+  return d && (d.isDiff || d.stat === "anom" || (currentField && currentField._dyn && currentField._dyn.div)) ? "div" : "seq";
+}
+
+// What "Default" means for the field on screen, for the picker's label.
+const RAMP_LABELS = Object.fromEntries([...CMAP_CHOICES.seq, ...CMAP_CHOICES.div]);
+function defaultCmapName(kind) {
+  if (kind === "div") return "diverging";
+  const f = currentField;
+  if (!f) return "";
+  const cfg = varConfigFor(f.var);
+  if (f.stat === "spread") return "Plasma";
+  if (cfg.stops) return f.var;  // the hand-built scale for this variable
+  return RAMP_LABELS[cfg.ramp] || cfg.ramp || "auto";
+}
+
+// The picker button is a miniature of the legend bar.
+function updateCmapButton() {
+  const src = el("legend-canvas"), c = el("cmap-swatch");
+  if (!src || !c) return;
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.drawImage(src, 0, 0, c.width, c.height);
+}
+
+function setColormap(kind, id) {
+  if (cmapChoice(kind) === id) return;
+  if (id === "default") delete state.cmap[kind][state.var];
+  else state.cmap[kind][state.var] = id;
+  for (const k of Object.keys(lutCache)) delete lutCache[k];
+  if (currentDisplay) {
+    currentLUT = currentDisplay.isDiff ? buildDiffLUT(currentDisplay.limit) : lutForField(currentField);
+    renderMeta();
+  }
+  saveState();
+}
+
+let cmapPop = null;
+function hideCmapPopover() {
+  if (cmapPop) { cmapPop.remove(); cmapPop = null; }
+}
+function swatchCanvas(rampName, kind) {
+  const c = document.createElement("canvas");
+  c.width = 64; c.height = 10;
+  const ctx = c.getContext("2d");
+  const img = ctx.createImageData(64, 10);
+  const rgba = [0, 0, 0, 0];
+  for (let x = 0; x < 64; x++) {
+    const t = x / 63;
+    if (rampName) rampColor(rampName, t, 1, rgba);
+    else if (kind === "div") { diffColor(t * 2 - 1, 1, rgba); rgba[3] = 255; }
+    else {
+      // the variable's own default scale
+      const cfg = currentField ? varConfigFor(currentField.var) : null;
+      if (cfg && cfg.stops) {
+        const lo = cfg.stops[0].v, hi = cfg.stops[cfg.stops.length - 1].v;
+        colormap(cfg.stops, lo + t * (hi - lo), rgba);
+        rgba[3] = 255;
+      } else {
+        rampColor((currentField && currentField._dyn && currentField._dyn.ramp) || (cfg && cfg.ramp) || "thermal", t, 1, rgba);
+      }
+    }
+    for (let y = 0; y < 10; y++) img.data.set(rgba, (y * 64 + x) * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+function showCmapPopover(x, y) {
+  hideCmapPopover();
+  hideInfoPopover();
+  const kind = cmapKindNow();
+  cmapPop = document.createElement("div");
+  cmapPop.className = "info-popover cmap-popover";
+  const title = document.createElement("div");
+  title.className = "cmap-title";
+  title.textContent = kind === "div" ? "Colour scale (diverging)" : "Colour scale";
+  cmapPop.appendChild(title);
+  for (const [id, label] of CMAP_CHOICES[kind]) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "cmap-row" + (cmapChoice(kind) === id ? " active" : "");
+    row.appendChild(swatchCanvas(id === "default" ? null : id, kind));
+    const name = document.createElement("span");
+    name.textContent = id === "default" ? `Default (${defaultCmapName(kind)})` : label;
+    row.appendChild(name);
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setColormap(kind, id);
+      cmapPop.querySelectorAll(".cmap-row").forEach((r) => r.classList.toggle("active", r === row));
+    });
+    cmapPop.appendChild(row);
+  }
+  cmapPop.addEventListener("click", (e) => e.stopPropagation());
+  document.body.appendChild(cmapPop);
+  const r = cmapPop.getBoundingClientRect();
+  cmapPop.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+  cmapPop.style.top = `${Math.max(8, Math.min(y - r.height / 2, window.innerHeight - r.height - 8))}px`;
+}
+el("cmap-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (cmapPop) { hideCmapPopover(); return; }
+  const r = e.currentTarget.getBoundingClientRect();
+  showCmapPopover(r.right + 10, r.top + r.height / 2);
+});
+document.addEventListener("click", hideCmapPopover);
 
 // -------------------------------------------------------- controls
 function stepMonth(inputId, delta) {
@@ -2109,7 +2319,8 @@ function buildDatasetSeg() {
       // keep only view preferences; the selection is rebuilt from the new dataset
       const saved = JSON.parse(localStorage.getItem("spearViewer") || "{}");
       const keep = { dataset: id, opacity: saved.opacity, particles: saved.particles,
-                     grat: saved.grat, contours: saved.contours, globe: saved.globe, units: saved.units };
+                     grat: saved.grat, contours: saved.contours, globe: saved.globe, units: saved.units,
+                     cmap: saved.cmap };
       localStorage.setItem("spearViewer", JSON.stringify(keep));
     } catch { /* best effort */ }
     location.assign(`${location.pathname}?dataset=${encodeURIComponent(id)}`);
@@ -2291,6 +2502,15 @@ async function init() {
       else if (SAVED.b.ensmean) state.b.stat = "mean";
     }
     if (SAVED.units) Object.assign(state.units, SAVED.units);
+  }
+  if (SAVED && SAVED.cmap) {
+    for (const k of ["seq", "div"]) {
+      const per = SAVED.cmap[k];
+      if (!per || typeof per !== "object") continue; // (older saves held a single id)
+      for (const [v, id] of Object.entries(per)) {
+        if (RAMPS[id] && CMAP_CHOICES[k].some(([c]) => c === id)) state.cmap[k][v] = id;
+      }
+    }
   }
 
   const expInfos = Object.fromEntries(
@@ -4147,6 +4367,133 @@ el("chat-close").addEventListener("click", () => {
   el("chat-panel").hidden = true;
   el("ask-bubble").hidden = false;
 });
+
+// "Context": show, inside the conversation, the on-screen statistics
+// (and extracted series / documentation excerpts) SPEAK is given with a
+// question. Nothing is sent to the LLM.
+const CTX_TITLES = {
+  "VIEW CONTEXT (current screen)": "Current view",
+  "EXTRACTED TIME SERIES": "Extracted time series",
+  "DOCUMENTATION EXCERPTS": "Documentation excerpts (for your last question)",
+};
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+
+// The field statistics line ("area-weighted mean 11.9; min -25.5 at ...;
+// p10/p50/p90 ...; band means ...") spelled out, one bullet each.
+function ctxStatBullets(text, unit) {
+  const u = unit ? ` ${unit}` : "";
+  const out = [];
+  for (const part of text.split(/;\s+/).filter(Boolean)) {
+    let m;
+    if ((m = part.match(/^area-weighted mean (\S+)$/))) {
+      out.push(`Area-weighted mean: ${m[1]}${u} — the average over the whole field, each grid cell weighted by its area`);
+    } else if ((m = part.match(/^(min|max) (\S+) at (.+)$/))) {
+      out.push(`${m[1] === "min" ? "Minimum" : "Maximum"}: ${m[2]}${u}, at ${m[3]}`);
+    } else if ((m = part.match(/^p10\/p50\/p90 (\S+)\/(\S+)\/(\S+)$/))) {
+      out.push(`Percentiles: 10th ${m[1]}${u}, median ${m[2]}${u}, 90th ${m[3]}${u} — 10 % of the grid cells lie below the 10th percentile, half below the median, 90 % below the 90th`);
+    } else if ((m = part.match(/^band means 90S-23S (\S+), 23S-23N (\S+), 23N-90N (\S+)$/))) {
+      out.push(`Latitude-band means: southern extratropics (90°S–23°S) ${m[1]}${u}, tropics (23°S–23°N) ${m[2]}${u}, northern extratropics (23°N–90°N) ${m[3]}${u}`);
+    } else {
+      out.push(cap(part));
+    }
+  }
+  return out;
+}
+
+// "Label: a; b; c" lines become a label with a list; bare lines stay as text.
+function ctxRow(parent, line) {
+  const m = line.match(/^(\s*)([^:]{1,60}?):\s(.*)$/);
+  if (!m) {
+    const row = document.createElement("div");
+    row.className = "ctx-row";
+    row.textContent = cap(line.trim());
+    parent.appendChild(row);
+    return;
+  }
+  const label = m[2].trim();
+  const stats = label.match(/^(Displayed field|A|B|Difference A-B) \[(.+)\]$/);
+  const parts = stats ? ctxStatBullets(m[3], stats[2]) : m[3].split(/;\s+/).filter(Boolean);
+  if (stats || parts.length > 1) {
+    // block: title line, bullets underneath
+    const blk = document.createElement("div");
+    blk.className = "ctx-block" + (m[1] ? " sub" : "");
+    const t = document.createElement("div");
+    t.className = "ctx-label ctx-block-title";
+    t.textContent = stats
+      ? ({ "Displayed field": "Displayed field", A: "Selection A", B: "Selection B", "Difference A-B": "Difference A − B" }[stats[1]]
+         + ` (${stats[2]})`)
+      : label;
+    blk.appendChild(t);
+    const ul = document.createElement("ul");
+    ul.className = "ctx-list";
+    for (const p of parts) { const li = document.createElement("li"); li.textContent = cap(p); ul.appendChild(li); }
+    blk.appendChild(ul);
+    parent.appendChild(blk);
+    return;
+  }
+  const row = document.createElement("div");
+  row.className = "ctx-row" + (m[1] ? " sub" : "");
+  const lab = document.createElement("span");
+  lab.className = "ctx-label";
+  lab.textContent = label;
+  row.appendChild(lab);
+  const v = document.createElement("span");
+  v.className = "ctx-value";
+  v.textContent = m[3];
+  row.appendChild(v);
+  parent.appendChild(row);
+}
+function ctxSection(parent, title, text) {
+  const sec = document.createElement("div");
+  sec.className = "ctx-sec";
+  const h = document.createElement("div");
+  h.className = "ctx-title";
+  h.textContent = CTX_TITLES[title] || title;
+  sec.appendChild(h);
+  const blocks = title.startsWith("DOCUMENTATION") || title.startsWith("EXTRACTED") ? text.split(/\n---\n/) : [text];
+  for (const blk of blocks) {
+    const card = document.createElement("div");
+    card.className = blocks.length > 1 ? "ctx-card" : "";
+    for (const line of blk.split("\n")) if (line.trim()) ctxRow(card, line);
+    sec.appendChild(card);
+  }
+  parent.appendChild(sec);
+}
+el("chat-context").addEventListener("click", async () => {
+  const btn = el("chat-context");
+  btn.disabled = true;
+  const lastQ = [...chat.messages].reverse().find((m) => m.role === "user");
+  const holder = chatEl("bot context", "Collecting what SPEAK can see…");
+  try {
+    const resp = await fetch(`${API}/api/chat/context`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ view: viewSnapshot(), query: lastQ ? lastQ.content : null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    holder.textContent = "";
+    const head = document.createElement("div");
+    head.className = "ctx-head";
+    head.textContent = "What SPEAK sees with your next question";
+    holder.appendChild(head);
+    for (const sec of data.sections) {
+      if (sec.title === "DATASET") continue; // the dataset notes are static background
+      ctxSection(holder, sec.title, sec.text);
+    }
+    const note = document.createElement("div");
+    note.className = "ctx-note";
+    note.textContent = data.note;
+    holder.appendChild(note);
+    el("chat-messages").scrollTop = holder.offsetTop - 8;
+  } catch (err) {
+    holder.classList.add("error");
+    holder.textContent = `Could not collect the context — ${err.message || err}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 el("chat-min").addEventListener("click", () => {
   el("chat-panel").classList.toggle("minimized");
 });
@@ -4953,6 +5300,10 @@ const CONTOUR_CASING = "rgba(0, 0, 0, 0.6)";
 const CONTOUR_MAX_LEVELS = 60;
 const CONTOUR_MAX_LABELS = 90;
 map.createPane("contours").style.zIndex = 435; // above borders (430), below particles (440)
+// Value labels get their own pane just above the lines: a marker's own
+// z-index is its pixel y (negative above the pane origin), which would
+// otherwise sink labels below the contour canvas after panning.
+map.createPane("contourLabels").style.zIndex = 436;
 map.getPane("contours").style.pointerEvents = "none";
 const contourRenderer = L.canvas({ pane: "contours" });
 const CONTOUR_INFO_TEXT =
@@ -5311,7 +5662,7 @@ function contoursPlaceLabels() {
             let deg = (Math.atan2(pt.y - prev.y, pt.x - prev.x) * 180) / Math.PI;
             if (deg > 90) deg -= 180; else if (deg < -90) deg += 180; // never upside down
             L.marker(ll, {
-              pane: "contours", interactive: false, keyboard: false,
+              pane: "contourLabels", interactive: false, keyboard: false,
               icon: L.divIcon({
                 className: "contour-label",
                 html: `<span style="color:${lv.color};transform:translate(-50%,-50%) rotate(${deg.toFixed(0)}deg)">${text}</span>`,
@@ -5657,7 +6008,8 @@ function snapTitle() {
 function snapFrame(shot, imgW, imgH, opts = {}) {
   const dpr = shot.width / imgW;
   const axes = opts.axes;
-  const mL = axes ? 66 : 24, mB = axes ? 46 : 24, mT = opts.title ? 44 : 24, mR = 24;
+  const legend = opts.legend;
+  const mL = axes ? 84 : 24, mB = axes ? 64 : 24, mT = opts.title ? 44 : 24, mR = legend ? 116 : 24;
   const W = imgW + mL + mR, H = imgH + mT + mB;
   const out = document.createElement("canvas");
   out.width = Math.round(W * dpr);
@@ -5704,16 +6056,75 @@ function snapFrame(shot, imgW, imgH, opts = {}) {
       ctx.stroke();
       ctx.fillText(t.label, mL - tick - 5, y + 4);
     }
+    // axis titles
+    ctx.font = "600 13px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Longitude", mL + imgW / 2, mT + imgH + mB - 12);
+    ctx.save();
+    ctx.translate(16, mT + imgH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Latitude", 0, 0);
+    ctx.restore();
   }
+  if (legend) snapColorbar(ctx, legend, mL + imgW + 30, mT, imgH);
   return out;
+}
+
+// Vertical colour bar in the export's right margin: a copy of the on-screen
+// legend (so banding and the chosen colour scale match the map), composited
+// over white, with its tick labels and units.
+function snapColorbar(ctx, legend, x, top, imgH) {
+  const src = el("legend-canvas");
+  const sctx = src.getContext("2d");
+  const px = sctx.getImageData(0, 0, src.width, 1).data; // one row is enough: columns are uniform
+  const barW = 16, barH = Math.max(120, Math.min(Math.round(imgH * 0.6), 320));
+  const y0 = top + Math.round((imgH - barH) / 2);
+  for (let y = 0; y < barH; y++) {
+    const c = Math.round(((barH - 1 - y) / (barH - 1)) * (src.width - 1));
+    const k = c * 4, a = px[k + 3] / 255;
+    const r = Math.round(px[k] * a + 255 * (1 - a));
+    const g = Math.round(px[k + 1] * a + 255 * (1 - a));
+    const b = Math.round(px[k + 2] * a + 255 * (1 - a));
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(x, y0 + y, barW, 1);
+  }
+  ctx.strokeStyle = "#2a2a2a";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y0 + 0.5, barW - 1, barH - 1);
+  ctx.fillStyle = "#1a1a1a";
+  ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const n = legend.ticks.length;
+  for (let i = 0; i < n; i++) {   // ticks are evenly spaced along the legend, lowest at the bottom
+    const y = Math.round(y0 + barH - 1 - (barH - 1) * (n > 1 ? i / (n - 1) : 0)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x + barW, y); ctx.lineTo(x + barW + 5, y); ctx.stroke();
+    ctx.fillText(legend.ticks[i], x + barW + 8, y);
+  }
+  // title sideways along the bar, to the right of the tick labels:
+  // "Variable (units)", reading bottom-to-top like a matplotlib colorbar
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "center";
+  ctx.font = "600 13px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  let title = `${legend.label} (${legend.units})`;
+  while (ctx.measureText(title).width > barH + 60 && title.length > 8) title = title.slice(0, -2).trimEnd() + "…";
+  const tickW = Math.max(0, ...legend.ticks.map((t) => ctx.measureText(t).width));
+  ctx.save();
+  ctx.translate(x + barW + 8 + tickW + 16, y0 + barH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(title, 0, 0);
+  ctx.restore();
 }
 
 function snapStem() {
   const d = currentDisplay;
   const time = el("month-input").value || "";
-  if (!d) return `spear_view_${time}`;
-  const statTok = { raw: state.member, mean: "ensmean", spread: "ensspread", anom: `anom${state.member}` }[state.stat] || state.stat;
-  return `spear_${d.isDiff ? "diff_" : ""}${d.var}_${state.experiment}_${statTok}_${time}`;
+  const ds = state.dataset || "view";
+  if (!d) return `${ds}_view_${time}`;
+  const statTok = meta && meta.ensemble
+    ? ({ raw: state.member, mean: "ensmean", spread: "ensspread", anom: `anom${state.member}` }[state.stat] || state.stat)
+    : null;
+  return [ds, d.isDiff ? "diff" : null, d.var, state.experiment.replace(/\//g, "_"), statTok, time].filter(Boolean).join("_");
 }
 
 function snapSave(canvas, filename) {
@@ -5743,7 +6154,7 @@ async function downloadViewPNG() {
     const size = globe.open ? { w: window.innerWidth, h: window.innerHeight } : map.getSize();
     const axes = globe.open ? null : snapAxisTicks(0, 0, size.x, size.y);
     const canvas = snapFrame(shot, globe.open ? size.w : size.x, globe.open ? size.h : size.y, {
-      title: snapTitle(), axes,
+      title: snapTitle(), axes, legend: snapLegend,
     });
     const ok = await snapSave(canvas, `${snapStem()}_${globe.open ? "globe" : "map"}.png`);
     if (ok) setStatus(`PNG saved (${canvas.width}×${canvas.height})`);
@@ -5803,6 +6214,7 @@ async function boxDownloadPNG() {
     crop.getContext("2d").drawImage(full, x0 * dpr, y0 * dpr, w * dpr, h * dpr, 0, 0, crop.width, crop.height);
     const b = box.bounds;
     const out = snapFrame(crop, w, h, {
+      legend: snapLegend,
       title: `${snapTitle()} · box ${snapFmtLat(b.south)} to ${snapFmtLat(b.north)}, ` +
              `${snapFmtLon(b.west)} to ${snapFmtLon(b.east)}`,
       axes: snapAxisTicks(x0, y0, w, h),

@@ -6,7 +6,7 @@
 <title>Climate Data Viewer</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-<link rel="stylesheet" href="style.css?v=11" />
+<link rel="stylesheet" href="style.css?v=18" />
 </head>
 <body>
 <div id="map"></div>
@@ -106,6 +106,7 @@
   <div class="chat-header" id="chat-header">
     <span class="chat-title">Ask SPEAK <span class="info-i" id="ask-info-2">&#9432;</span></span>
     <span class="chat-header-btns">
+      <button type="button" id="chat-context" class="chat-context-btn" title="Show what SPEAK can see: the on-screen statistics and extracted series it is given with your questions">Context</button>
       <button type="button" id="chat-max" title="Expand / shrink">&#x26F6;</button>
       <button type="button" id="chat-min" title="Minimize">&#8213;</button>
       <button type="button" id="chat-close" title="Close">&#10005;</button>
@@ -268,7 +269,10 @@
       <div class="legend-handle" id="legend-handle-hi" title="Drag to set upper bound"></div>
     </div>
     <div class="legend-ticks" id="legend-ticks"></div>
-    <div class="legend-units" id="legend-units"></div>
+    <div class="legend-foot">
+      <button type="button" id="cmap-btn" class="cmap-btn" title="Choose a colour scale"><canvas id="cmap-swatch" width="28" height="8"></canvas><span class="cmap-caret">&#9662;</span></button>
+      <div class="legend-units" id="legend-units"></div>
+    </div>
     <div class="filter-title">Filter Values</div>
     <div class="filter-row">
       <label>Above <input type="number" id="filter-lo" step="any" placeholder="&mdash;" /></label>
@@ -283,6 +287,6 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="config.js"></script>
-<script src="app.js?v=37"></script>
+<script src="app.js?v=59"></script>
 </body>
 </html>

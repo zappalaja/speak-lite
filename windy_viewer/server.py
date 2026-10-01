@@ -1676,6 +1676,46 @@ def _check_chat_rate(request: Request):
         _rate_global += 1
 
 
+def _chat_context(view: dict, query: str | None = None) -> list[tuple[str, str]]:
+    """The context sections appended to the system prompt for a chat turn:
+    dataset notes, on-screen statistics, extracted time series and (given
+    the question) documentation excerpts."""
+    src = _src(view.get("dataset"))
+    sections = [("DATASET", _dataset_notes(src)),
+                ("VIEW CONTEXT (current screen)", _build_view_context(src, view))]
+    ts_ids = view.get("ts_jobs")
+    if not isinstance(ts_ids, list):
+        ts_ids = [view.get("ts_job")] if isinstance(view.get("ts_job"), str) else []
+    summaries = []
+    for i, tid in enumerate(ts_ids[:3]):
+        if isinstance(tid, str):
+            s = _ts_summary(tid)
+            if s:
+                tag = "most recent" if i == 0 else f"{i + 1} extractions ago"
+                summaries.append(f"[Extraction {i + 1} — {tag}]\n{s}")
+    if summaries:
+        sections.append(("EXTRACTED TIME SERIES", "\n---\n".join(summaries)))
+    if query:
+        docs = _rag_retrieve(query)
+        if docs:
+            sections.append(("DOCUMENTATION EXCERPTS", docs))
+    return sections
+
+
+@app.post("/api/chat/context")
+def chat_context(payload: dict):
+    """What SPEAK would receive for the current view (no LLM call): lets
+    the user inspect the statistics and notes behind the answers."""
+    view = payload.get("view") or {}
+    query = payload.get("query")
+    query = query if isinstance(query, str) and query.strip() else None
+    sections = _chat_context(view, query)
+    return {"instructions": SYSTEM_PROMPT,
+            "sections": [{"title": t, "text": txt} for t, txt in sections],
+            "note": ("Documentation excerpts are retrieved per question; shown here for your last question."
+                     if query else "Documentation excerpts are added per question once you ask one.")}
+
+
 @app.post("/api/chat")
 def chat(payload: dict, request: Request):
     for m in payload.get("messages", []):
@@ -1691,25 +1731,8 @@ def chat(payload: dict, request: Request):
     if not messages:
         raise HTTPException(400, "no messages")
     view = payload.get("view") or {}
-    src = _src(view.get("dataset"))
-    context = _build_view_context(src, view)
-    system = (SYSTEM_PROMPT + "\n\n=== DATASET ===\n" + _dataset_notes(src)
-              + "\n\n=== VIEW CONTEXT (current screen) ===\n" + context)
-    ts_ids = view.get("ts_jobs")
-    if not isinstance(ts_ids, list):
-        ts_ids = [view.get("ts_job")] if isinstance(view.get("ts_job"), str) else []
-    summaries = []
-    for i, tid in enumerate(ts_ids[:3]):
-        if isinstance(tid, str):
-            s = _ts_summary(tid)
-            if s:
-                tag = "most recent" if i == 0 else f"{i + 1} extractions ago"
-                summaries.append(f"[Extraction {i + 1} — {tag}]\n{s}")
-    if summaries:
-        system += "\n\n=== EXTRACTED TIME SERIES ===\n" + "\n---\n".join(summaries)
-    docs = _rag_retrieve(messages[-1]["content"])
-    if docs:
-        system += "\n\n=== DOCUMENTATION EXCERPTS ===\n" + docs
+    sections = _chat_context(view, messages[-1]["content"])
+    system = SYSTEM_PROMPT + "".join(f"\n\n=== {t} ===\n{txt}" for t, txt in sections)
     try:
         reply = _call_llm(system, messages)
     except HTTPException:
