@@ -129,19 +129,22 @@
     <div class="seg" id="dataset-seg"></div>
   </div>
 
-  <!-- variable groups are built from /api/meta (one block per realm/group) -->
-  <div id="var-groups"></div>
-  <!-- the pressure-level block is moved into the group that has level variables -->
-  <div id="plev-holder" hidden>
-    <span class="subgroup-title">Pressure levels</span>
-    <div class="row plev-inline">
-      <span>Level</span>
-      <div class="dropdown">
-        <button type="button" class="dd-btn" id="plev-btn"></button>
-        <div class="dd-list" id="plev-list" hidden></div>
-      </div>
+  <!-- variable picker: one dropdown, items grouped by realm/group (built from /api/meta) -->
+  <div class="row row-col" id="var-row">
+    <span>Variable</span>
+    <div class="dropdown var-dropdown">
+      <button type="button" class="dd-btn" id="var-btn"></button>
+      <div class="dd-list" id="var-list" hidden></div>
     </div>
-    <div class="seg" id="var-seg-plev"></div>
+    <span class="var-long" id="var-long"></span>
+  </div>
+  <!-- shown only when the dataset has pressure-level variables -->
+  <div class="row" id="plev-holder" hidden>
+    <span>Level</span>
+    <div class="dropdown">
+      <button type="button" class="dd-btn" id="plev-btn"></button>
+      <div class="dd-list" id="plev-list" hidden></div>
+    </div>
   </div>
 
   <div class="row row-col">

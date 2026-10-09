@@ -2354,80 +2354,136 @@ function showInfoPopover(text, x, y) {
 }
 document.addEventListener("click", hideInfoPopover);
 
-// Variable buttons live in three groups (surface/TOA, pressure levels,
-// ocean); selecting in one group clears the active state in all.
+// Variable picker: a single dropdown whose items are grouped by the
+// variable's group (Zarr group / FMS realm); level-bearing variables of a
+// group sit under a "Pressure levels" sub-header.  A filter box at the top
+// keeps long lists (the production dataset has many variables) searchable.
 function buildVarButtons() {
-  // One block per group (Zarr group / FMS realm) in order of appearance;
-  // level-bearing variables of a group go under its "Pressure levels"
-  // sub-block, which also hosts the level dropdown.
-  const root = el("var-groups");
+  const btn = el("var-btn");
+  const list = el("var-list");
   const holder = el("plev-holder");
-  root.parentNode.insertBefore(holder, root.nextSibling); // reclaim before wiping
-  holder.hidden = true;
-  root.innerHTML = "";
-  el("var-seg-plev").innerHTML = "";
-  const blocks = {};
-  const segFor = (v) => {
-    if (v.plev) return el("var-seg-plev");
-    const g = v.group || "";
-    if (!blocks[g]) {
-      const row = document.createElement("div");
-      row.className = "row row-col";
-      const hint = document.createElement("span");
-      hint.className = "group-hint";
-      hint.textContent = groupLabel(g);
-      hint.title = meta.grid || "";
-      const seg = document.createElement("div");
-      seg.className = "seg";
-      row.appendChild(hint);
-      row.appendChild(seg);
-      root.appendChild(row);
-      blocks[g] = { row, seg };
-    }
-    return blocks[g].seg;
-  };
-  const plevGroup = Object.values(meta.variables).find((v) => v.plev);
-  if (plevGroup) {
-    // make sure the block exists, then attach the level sub-block to it
-    const g = plevGroup.group || "";
-    segFor({ group: g, plev: false });
-    blocks[g].row.appendChild(holder);
-    holder.hidden = false;
-  }
+  holder.hidden = !Object.values(meta.variables).some((v) => v.plev);
+
+  // Order: groups in order of first appearance, surface variables first,
+  // then the group's pressure-level variables.
+  const groups = [];
+  const byGroup = {};
   for (const [k, v] of Object.entries(meta.variables)) {
-    const target = segFor(v);
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.dataset.value = k;
-    btn.title = v.long;
-    // Label with the store's actual variable name; ⓘ carries the full name.
-    btn.textContent = k;
-    const i = document.createElement("span");
-    i.className = "info-i";
-    i.textContent = "ⓘ";
-    i.addEventListener("click", (e) => {
-      e.stopPropagation();
-      showInfoPopover(v.long, e.clientX, e.clientY);
-    });
-    btn.appendChild(i);
-    if (k === state.var) btn.classList.add("active");
-    btn.addEventListener("click", () => {
-      if (state.var === k) return;
-      document
-        .querySelectorAll("#var-groups button")
-        .forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.var = k;
-      state.filter = { lo: null, hi: null }; // filter bounds are per-variable
-      // variables of one dataset can cover different periods
-      const mi = el("month-input");
-      if (v.start && v.end && (mi.value < v.start || mi.value > v.end)) mi.value = v.start;
-      rebuildUnitSeg();
-      updateControlStates();
-      loadField();
-    });
-    target.appendChild(btn);
+    const g = v.group || "";
+    if (!byGroup[g]) { byGroup[g] = { sfc: [], plev: [] }; groups.push(g); }
+    byGroup[g][v.plev ? "plev" : "sfc"].push(k);
   }
+
+  const setLabel = () => {
+    const v = meta.variables[state.var];
+    btn.textContent = state.var;
+    btn.title = v ? v.long : "";
+    el("var-long").textContent = v ? v.long : "";
+  };
+
+  const select = (k) => {
+    list.hidden = true;
+    if (state.var === k) return;
+    const v = meta.variables[k];
+    state.var = k;
+    state.filter = { lo: null, hi: null }; // filter bounds are per-variable
+    // variables of one dataset can cover different periods
+    const mi = el("month-input");
+    if (v.start && v.end && (mi.value < v.start || mi.value > v.end)) mi.value = v.start;
+    setLabel();
+    list.querySelectorAll(".dd-item").forEach((i) =>
+      i.classList.toggle("selected", i.dataset.value === k)
+    );
+    rebuildUnitSeg();
+    updateControlStates();
+    loadField();
+  };
+
+  list.innerHTML = "";
+  const nVars = Object.keys(meta.variables).length;
+  let filter = null;
+  if (nVars > 8) {
+    const wrap = document.createElement("div");
+    wrap.className = "dd-filter";
+    filter = document.createElement("input");
+    filter.type = "search";
+    filter.placeholder = "Filter variables…";
+    filter.setAttribute("aria-label", "Filter variables");
+    filter.addEventListener("click", (e) => e.stopPropagation());
+    filter.addEventListener("input", () => applyFilter(filter.value));
+    filter.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { list.hidden = true; }
+      if (e.key === "Enter") {
+        const first = list.querySelector(".dd-item:not([hidden])");
+        if (first) select(first.dataset.value);
+      }
+    });
+    wrap.appendChild(filter);
+    list.appendChild(wrap);
+  }
+
+  const addItem = (k) => {
+    const v = meta.variables[k];
+    const item = document.createElement("div");
+    item.className = "dd-item var-item" + (k === state.var ? " selected" : "");
+    item.dataset.value = k;
+    item.dataset.search = `${k} ${v.long || ""}`.toLowerCase();
+    const name = document.createElement("span");
+    name.className = "var-name";
+    name.textContent = k;
+    const long = document.createElement("span");
+    long.className = "var-desc";
+    long.textContent = v.long || "";
+    item.appendChild(name);
+    item.appendChild(long);
+    item.addEventListener("click", (e) => { e.stopPropagation(); select(k); });
+    list.appendChild(item);
+  };
+  const addHeader = (text, sub) => {
+    const h = document.createElement("div");
+    h.className = "dd-header" + (sub ? " sub" : "");
+    h.textContent = text;
+    list.appendChild(h);
+  };
+  for (const g of groups) {
+    addHeader(groupLabel(g));
+    byGroup[g].sfc.forEach(addItem);
+    if (byGroup[g].plev.length) {
+      addHeader("Pressure levels", true);
+      byGroup[g].plev.forEach(addItem);
+    }
+  }
+
+  // Hide non-matching items; a header disappears when nothing under it matches.
+  const applyFilter = (q) => {
+    q = (q || "").trim().toLowerCase();
+    let lastHeaders = [];
+    for (const node of list.children) {
+      if (node.classList.contains("dd-header")) {
+        if (!node.classList.contains("sub")) lastHeaders = [];
+        node.hidden = true;
+        lastHeaders.push(node);
+      } else if (node.classList.contains("dd-item")) {
+        const show = !q || node.dataset.search.includes(q);
+        node.hidden = !show;
+        if (show) { lastHeaders.forEach((h) => (h.hidden = false)); lastHeaders = []; }
+      }
+    }
+  };
+
+  setLabel();
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".dd-list").forEach((l) => {
+      if (l !== list) l.hidden = true;
+    });
+    list.hidden = !list.hidden;
+    if (!list.hidden) {
+      if (filter) { filter.value = ""; applyFilter(""); filter.focus(); }
+      const cur = list.querySelector(".dd-item.selected");
+      if (cur) cur.scrollIntoView({ block: "nearest" });
+    }
+  };
 }
 
 function buildPlevDropdown() {
