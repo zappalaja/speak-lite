@@ -440,16 +440,17 @@ class CatalogSource(Source):
                     ds = xr.open_zarr(self._store(), group=var, consolidated=False, decode_timedelta=False)
                 ds = _normalise_grid(ds)
                 # Icechunk keeps the files' _FillValue as the zarr fill_value, which
-                # xarray does not mask for zarr-v3 arrays: mask it here (and
-                # missing_value) from the attrs the catalog recorded.
+                # xarray does not mask for zarr-v3 arrays. Re-run xarray's CF
+                # mask decoding with the fill attrs the catalog recorded: it wraps
+                # the array lazily, so only the chunks actually read get masked
+                # (a plain `where` would load the whole variable without dask).
                 attrs = (self.catalog["variables"].get(var) or {}).get("attrs") or {}
-                da = ds[var]
-                for key in ("_FillValue", "missing_value"):
-                    fv = attrs.get(key)
-                    if fv is None or not np.issubdtype(da.dtype, np.floating):
-                        continue
-                    da = da.where(da != da.dtype.type(fv))
-                ds[var] = da
+                v = ds[var].variable
+                fills = {k: attrs[k] for k in ("_FillValue", "missing_value") if attrs.get(k) is not None}
+                if fills and np.issubdtype(v.dtype, np.floating) and "_FillValue" not in v.encoding:
+                    v = v.copy(deep=False)
+                    v.attrs.update({k: v.dtype.type(fv) for k, fv in fills.items()})
+                    ds[var] = xr.conventions.decode_cf_variable(var, v, mask_and_scale=True, decode_times=False)
                 self._datasets[var] = ds
             return self._datasets[var]
 

@@ -135,8 +135,8 @@ class _ProgressAwareHandler(logging.StreamHandler):
 # *hints* (variable name, realm, date range); everything that matters is
 # read from the file itself, so files with other names work too.
 FMS_PATTERN = r"^(?P<realm>[^.]+)\.(?P<start>\d{6,10})-(?P<end>\d{6,10})\.(?P<var>.+)\.nc4?$"
-CMIP_PATTERN = (r"^(?P<var>[A-Za-z0-9]+)_(?P<realm>[A-Za-z0-9]+)_(?P<rest>.+?)_"
-                r"(?P<start>\d{4,12})-(?P<end>\d{4,12})(?:-clim)?\.nc4?$")
+CMIP_PATTERN = (r"^(?P<var>[A-Za-z0-9]+)_(?P<table>[A-Za-z0-9]+)_(?P<rest>.+?)_"
+                r"(?P<start>\d{4,12})-(?P<end>\d{4,12})(?:-clim)?\.nc4?$")  # table (day, Amon) is not a realm
 DEFAULT_PATTERN = None  # auto: try the known conventions, else content only
 KNOWN_PATTERNS = [FMS_PATTERN, CMIP_PATTERN]
 # any "YYYYMMDD-YYYYMMDD"-like pair somewhere in the name
@@ -296,6 +296,7 @@ def _name_hints(name: str, pattern: str | None) -> dict | None:
         if m:
             d = m.groupdict()
             d.pop("rest", None)
+            d.pop("table", None)
             return d
     m = _STAMP_RX.search(name)
     if m and len(m.group(1)) == len(m.group(2)):
