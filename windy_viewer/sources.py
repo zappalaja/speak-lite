@@ -439,6 +439,17 @@ class CatalogSource(Source):
                     warnings.simplefilter("ignore")
                     ds = xr.open_zarr(self._store(), group=var, consolidated=False, decode_timedelta=False)
                 ds = _normalise_grid(ds)
+                # Icechunk keeps the files' _FillValue as the zarr fill_value, which
+                # xarray does not mask for zarr-v3 arrays: mask it here (and
+                # missing_value) from the attrs the catalog recorded.
+                attrs = (self.catalog["variables"].get(var) or {}).get("attrs") or {}
+                da = ds[var]
+                for key in ("_FillValue", "missing_value"):
+                    fv = attrs.get(key)
+                    if fv is None or not np.issubdtype(da.dtype, np.floating):
+                        continue
+                    da = da.where(da != da.dtype.type(fv))
+                ds[var] = da
                 self._datasets[var] = ds
             return self._datasets[var]
 
