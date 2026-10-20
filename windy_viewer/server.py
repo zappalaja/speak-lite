@@ -26,6 +26,7 @@ from pathlib import Path
 import requests
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -275,19 +276,48 @@ def _level_group(src, ds, da, lev):
     return _load_da(da.isel({ldim: slice(g0, min(g0 + k, lvals.size))}))
 
 
+def _grid_wraps(lon: np.ndarray) -> bool:
+    """True when the grid spans the globe in longitude (column nlon-1 joins
+    column 0); a regional grid (CONUS, ...) must not be tiled around."""
+    if lon.size < 2:
+        return False
+    dlon = abs(float(lon[1] - lon[0]))
+    return float(lon.max() - lon.min()) >= 360.0 - 1.5 * dlon
+
+
 def _grid_meta(ds: xr.Dataset) -> dict:
     lon = ds.lon.values.astype(np.float64)
     lat = ds.lat.values.astype(np.float64)
-    shift = int(np.searchsorted(lon, 180.0))
+    wrap = _grid_wraps(lon)
+    if wrap:
+        shift = int(np.searchsorted(lon, 180.0))      # roll so the field starts at -180
+        lon0 = float(lon[shift] - 360.0)
+    else:
+        shift = 0                                     # regional: keep the native order
+        lon0 = float(lon[0] - 360.0) if lon[0] > 180.0 else float(lon[0])
     return {
         "nlat": int(lat.size),
         "nlon": int(lon.size),
         "lat0": float(lat[0]),
         "dlat": float(lat[1] - lat[0]),
-        "lon0": float(lon[shift] - 360.0),
+        "lon0": lon0,
         "dlon": float(lon[1] - lon[0]),
+        "wrap": wrap,
         "_shift": shift,
     }
+
+
+def _lon_index(lon: np.ndarray, plon: float) -> int | None:
+    """Nearest column for a longitude in either convention; None when the
+    point lies outside a regional grid."""
+    dlon = float(lon[1] - lon[0])
+    if _grid_wraps(lon):
+        return int(round(((plon % 360) - lon[0]) / dlon) % lon.size)
+    for cand in (plon, plon + 360.0, plon - 360.0):
+        j = int(round((cand - lon[0]) / dlon))
+        if 0 <= j < lon.size:
+            return j
+    return None
 
 
 def _load_values(da: xr.DataArray) -> np.ndarray:
@@ -342,7 +372,7 @@ def field(
     var: str = Query("pr"),
     experiment: str = Query("scenarioSSP5-85"),
     member: str = Query("r1i1p1f1"),
-    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}$"),
+    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}(-\d{2})?$"),
     plev: float | None = Query(None, gt=0),
     stat: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
     dataset: str | None = Query(None),
@@ -405,7 +435,7 @@ def field(
 def wind(
     experiment: str = Query("scenarioSSP5-85"),
     member: str = Query("r1i1p1f1"),
-    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}$"),
+    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}(-\d{2})?$"),
     plev: float | None = Query(None, gt=0),
     dataset: str | None = Query(None),
 ):
@@ -488,7 +518,7 @@ def _sel_text(src, experiment: str, member: str, time: str,
               da: xr.DataArray = None, stat: str = "raw") -> str:
     if member == "ensmean" and stat == "raw":
         stat = "mean"
-    text = f"experiment {experiment}, {src.stat_text(stat, member)}, month {time}"
+    text = f"experiment {experiment}, {src.stat_text(stat, member)}, time {time}"
     lev = src.level_hpa(da) if da is not None else None
     if lev is not None:
         text += f", pressure level {lev} hPa"
@@ -568,13 +598,13 @@ def download(
     var: str = Query("pr"),
     experiment: str = Query("scenarioSSP5-85"),
     member: str = Query("r1i1p1f1"),
-    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}$"),
+    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}(-\d{2})?$"),
     plev: float | None = Query(None, gt=0),
     stat: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
     compare: bool = Query(False),
     experiment_b: str = Query("scenarioSSP5-85"),
     member_b: str = Query("r2i1p1f1"),
-    time_b: str = Query("2030-01", pattern=r"^\d{4}-\d{2}$"),
+    time_b: str = Query("2030-01", pattern=r"^\d{4}-\d{2}(-\d{2})?$"),
     stat_b: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
     dataset: str | None = Query(None),
 ):
@@ -694,6 +724,55 @@ def _ts_month_list(start: str, end: str):
     return out
 
 
+def _range_within(exp: dict, start: str, end: str) -> bool:
+    """start..end (YYYY-MM or YYYY-MM-DD) lies inside the experiment, whose
+    bounds may be day-stamped for daily data: compare at the range's precision."""
+    return exp["start"][:len(start)] <= start <= end <= exp["end"][:len(end)]
+
+
+def _py_time(t):
+    """numpy datetime64 (standard calendars) -> datetime; cftime stays as is."""
+    if isinstance(t, np.datetime64):
+        return pd.Timestamp(t).to_pydatetime()
+    return t
+
+
+def _time_frac_year(t) -> float:
+    """Decimal year of a datetime/cftime value in its own calendar, for
+    plotting: 1992-07-01 -> 1992.497."""
+    import cftime
+    t = _py_time(t)
+    try:
+        if isinstance(t, cftime.datetime):
+            y0 = cftime.datetime(t.year, 1, 1, calendar=t.calendar)
+            y1 = cftime.datetime(t.year + 1, 1, 1, calendar=t.calendar)
+        else:
+            y0 = datetime(t.year, 1, 1)
+            y1 = datetime(t.year + 1, 1, 1)
+        ndays = (y1 - y0).days
+        elapsed = t - y0
+        frac = (elapsed.days + elapsed.seconds / 86400.0) / ndays
+    except Exception:  # noqa: BLE001
+        frac = (t.month - 0.5) / 12
+    return t.year + frac
+
+
+def _time_label(t, freq: str) -> str:
+    """ISO-style label at the frequency's precision (the CSV time column)."""
+    t = _py_time(t)
+    if freq == "year":
+        return f"{t.year:04d}"
+    if freq == "month":
+        return f"{t.year:04d}-{t.month:02d}"
+    if freq == "day":
+        return f"{t.year:04d}-{t.month:02d}-{t.day:02d}"
+    return f"{t.year:04d}-{t.month:02d}-{t.day:02d}T{t.hour:02d}"
+
+
+def _freq_word(freq: str) -> str:
+    return {"year": "yearly", "month": "monthly", "day": "daily"}.get(freq, f"{freq} steps")
+
+
 def _run_ts_job(job_id: str, p: dict):
     job = _ts_jobs[job_id]
     try:
@@ -702,10 +781,13 @@ def _run_ts_job(job_id: str, p: dict):
         ds = src.open(p["experiment"], p["var"])
         lat = ds.lat.values.astype(float)
         lon = ds.lon.values.astype(float)
-        ilats, ilons, plats, plons = [], [], [], []
-        for pt in p["points"]:
+        ilats, ilons, plats, plons, outside = [], [], [], [], []
+        for k, pt in enumerate(p["points"]):
             i = int(np.clip(round((pt["lat"] - lat[0]) / (lat[1] - lat[0])), 0, lat.size - 1))
-            j = int(round(((pt["lon"] % 360) - lon[0]) / (lon[1] - lon[0])) % lon.size)
+            j = _lon_index(lon, float(pt["lon"]))
+            if j is None:           # off a regional grid: keep the station, values become NaN
+                outside.append(k)
+                j = 0
             ilats.append(i)
             ilons.append(j)
             plats.append(float(lat[i]))
@@ -729,10 +811,12 @@ def _run_ts_job(job_id: str, p: dict):
                 lon=xr.DataArray(ilons, dims="station"),
             )
             da = _load_da(da)
-            all_times.extend(list(da.time.values))
+            all_times.extend(_py_time(t) for t in da.time.values)
             all_vals.append(np.asarray(da.values, dtype=np.float64))
             job["progress"] = min(0.97, (b0 + len(batch)) / len(months))
         data = np.concatenate(all_vals, axis=0) * cfg["scale"] + offset
+        if outside:
+            data[:, outside] = np.nan
         lev_txt = f" · {p['plev']} hPa" if cfg["plev"] else ""
         sids = p.get("station_ids") or [k + 1 for k in range(len(plats))]
         labels = [
@@ -741,10 +825,12 @@ def _run_ts_job(job_id: str, p: dict):
             for k in range(len(plats))
         ]
         colors = [_station_color(sids[k]) for k in range(len(plats))]
+        freq = cfg.get("frequency", "month")
         job["result"] = {
             "cftimes": all_times,
-            "x": [t.year + (t.month - 0.5) / 12 for t in all_times],
-            "months": [f"{t.year:04d}-{t.month:02d}" for t in all_times],
+            "frequency": freq,
+            "x": [_time_frac_year(t) for t in all_times],
+            "months": [_time_label(t, freq) for t in all_times],  # time labels at the data's precision
             "values": data,
             "labels": labels,
             "colors": colors,
@@ -777,16 +863,32 @@ def _ts_plot_png(r) -> bytes:
                     color=colors[s])
         ax.legend(fontsize=8, facecolor="#2a2a29", edgecolor="#4a4a48",
                   labelcolor="#ddd", ncols=2)
-        # x axis in calendar form (YYYY-MM), not fractional years
-        from matplotlib.ticker import FuncFormatter
+        # x axis in calendar form, not fractional years; precision follows the
+        # plotted span (years -> YYYY, months -> YYYY-MM, days -> YYYY-MM-DD)
+        from matplotlib.ticker import FuncFormatter, MaxNLocator
+        xs = np.asarray(r["x"], dtype=float)
+        span = float(xs.max() - xs.min()) if xs.size > 1 else 0.0
+        freq = r.get("frequency", "month")
+        if span > 4 or freq == "year":
+            prec = "year"
+        elif span > 0.5 or freq == "month":
+            prec = "month"
+        else:
+            prec = "day"
 
-        def _month_fmt(x, _pos):
+        def _date_fmt(x, _pos):
+            from datetime import date, timedelta
             yr = int(np.floor(x))
-            m = int(round((x - yr) * 12 + 0.5))
-            m = min(12, max(1, m))
-            return f"{yr}-{m:02d}"
+            if prec == "year":
+                return f"{yr:04d}"
+            ndays = 366 if (yr % 4 == 0 and (yr % 100 != 0 or yr % 400 == 0)) else 365
+            d = date(yr, 1, 1) + timedelta(days=int((x - yr) * ndays))
+            return d.strftime("%Y-%m") if prec == "month" else d.isoformat()
 
-        ax.xaxis.set_major_formatter(FuncFormatter(_month_fmt))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=8, integer=(prec == "year")))
+        ax.xaxis.set_major_formatter(FuncFormatter(_date_fmt))
+        if prec == "day":
+            fig.autofmt_xdate(rotation=30)
         ax.tick_params(axis="x", labelsize=8)
         ax.set_title(r["title"], color="#eee", fontsize=11)
         ax.set_ylabel(r["units"], color="#c8c8c2")
@@ -818,7 +920,7 @@ def ts_start(payload: dict):
         raise HTTPException(400, f"1-{TS_MAX_STATIONS} stations required")
     start, end = payload.get("start", ""), payload.get("end", "")
     exp = src.experiments[experiment]
-    if not (exp["start"] <= start <= end <= exp["end"]):
+    if not _range_within(exp, start, end):
         raise HTTPException(400, f"range must lie within {exp['start']}..{exp['end']}")
     months = _ts_month_list(start, end)
     if len(months) > TS_MAX_MONTHS:
@@ -941,7 +1043,7 @@ def ts_data(job_id: str, format: str = Query("csv", pattern="^(csv|nc)$")):
             f"station {k + 1}: {_loc_str(r['plats'][k], r['plons'][k])}"
             for k in range(len(r["plats"]))
         ),
-        "period": f"{p['start']} to {p['end']} (monthly)",
+        "period": f"{p['start']} to {p['end']} ({_freq_word(r.get('frequency', 'month'))}, {len(r['months'])} steps)",
         "units_note": f"values in display units: {r['units']}"
                       + (" (difference-like: no offset applied)"
                          if p["stat"] in ("spread", "anom") else ""),
@@ -1148,7 +1250,7 @@ def box_start(payload: dict):
     box = _parse_box(payload.get("box") or {})
     start, end = payload.get("start", ""), payload.get("end", "")
     exp = src.experiments[experiment]
-    if not (exp["start"] <= start <= end <= exp["end"]):
+    if not _range_within(exp, start, end):
         raise HTTPException(400, f"range must lie within {exp['start']}..{exp['end']}")
     months = _ts_month_list(start, end)
     if BOX_MAX_MONTHS and len(months) > BOX_MAX_MONTHS:
@@ -1204,6 +1306,7 @@ def box_data(job_id: str, format: str = Query("nc", pattern="^(nc|csv)$")):
     da = r["da"]
     var = p["var"]
     src = _src(p["dataset"])
+    cfg = src.variables[var] if var in src.variables else {}
     box = p["box"]
     lev = src.level_hpa(da)
     lev_txt = f", pressure level {lev} hPa" if lev is not None else ""
@@ -1215,7 +1318,7 @@ def box_data(job_id: str, format: str = Query("nc", pattern="^(nc|csv)$")):
         "selection": f"experiment {p['experiment']}, {src.stat_text(p['stat'], p['member'])}, "
                      f"months {p['start']} to {p['end']}{lev_txt}",
         "statistic": src.stat_text(p["stat"], p["member"]),
-        "period": f"{p['start']} to {p['end']} (monthly, {da.sizes['time']} steps)",
+        "period": f"{p['start']} to {p['end']} ({_freq_word(cfg.get('frequency', 'month'))}, {da.sizes['time']} steps)",
         "box_requested": f"lat {box['south']:.3f} to {box['north']:.3f}, "
                          f"lon {box['west']:.3f} to {box['east']:.3f} (degrees east, as drawn)",
         "box_grid": f"{lat.size} lat x {lon.size} lon = {lat.size * lon.size} cells; "
@@ -1239,9 +1342,11 @@ def box_data(job_id: str, format: str = Query("nc", pattern="^(nc|csv)$")):
         buf.write(f"# {k}: {_csv_attr(v)}\n")
     for k, v in da.attrs.items():
         buf.write(f"# column {var} {k}: {_csv_attr(v)}\n")
-    buf.write("# columns: time (YYYY-MM), lat (degrees_north), lon (degrees_east), "
+    bfreq = cfg.get("frequency", "month")
+    buf.write(f"# columns: time ({'YYYY-MM-DD' if bfreq == 'day' else 'YYYY-MM' if bfreq == 'month' else 'ISO'}), "
+              "lat (degrees_north), lon (degrees_east), "
               f"{var} ({da.attrs.get('units', 'units unknown')})\n")
-    times = np.array([f"{t.year:04d}-{t.month:02d}" for t in da.time.values])
+    times = np.array([_time_label(t, bfreq) for t in da.time.values])
     vals = np.asarray(da.values, dtype=np.float64)
     nt, ni, nj = vals.shape
     T, I, J = np.meshgrid(np.arange(nt), np.arange(ni), np.arange(nj), indexing="ij")
@@ -1269,7 +1374,7 @@ def _ts_summary(job_id: str) -> str:
     lines = [
         f"{p['var']} ({src.stat_text(p['stat'], p['member'])}), "
         f"experiment {p['experiment']}{lev}, {p['start']} to {p['end']} "
-        f"({len(r['months'])} monthly values), units {r['units']}"
+        f"({len(r['months'])} {_freq_word(r.get('frequency', 'month'))} values), units {r['units']}"
     ]
     x = np.asarray(r["x"], dtype=float)
     for k in range(r["values"].shape[1]):
@@ -1413,7 +1518,9 @@ def _display_field(src, varname, experiment, member, time, plev, stat="raw"):
 
 def _point_value(vals, lat, lon, plat, plon):
     i = int(np.clip(round((plat - lat[0]) / (lat[1] - lat[0])), 0, lat.size - 1))
-    j = int(round(((plon % 360) - lon[0]) / (lon[1] - lon[0])) % lon.size)
+    j = _lon_index(lon, plon)
+    if j is None:
+        return None
     v = vals[i, j]
     return float(v) if np.isfinite(v) else None
 

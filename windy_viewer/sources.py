@@ -168,7 +168,7 @@ class Source:
             "description": self.description, "link": self.link, "home": self.home,
             "experiments": self.experiments,
             "variables": {k: {kk: v[kk] for kk in ("units", "native_units", "family", "label", "long",
-                                                  "plev", "group", "start", "end")}
+                                                  "plev", "group", "start", "end", "frequency")}
                           for k, v in self.variables.items()},
             "levels": self.levels,
             "members": self.members,
@@ -261,7 +261,8 @@ class Source:
         }.get(stat, long)
 
 
-def _var_entry(name: str, attrs: dict, dims, level_dim, group, start, end, override: dict | None = None) -> dict:
+def _var_entry(name: str, attrs: dict, dims, level_dim, group, start, end, override: dict | None = None,
+               frequency: str = "month") -> dict:
     """Build the per-variable description from attrs (+ config overrides)."""
     ov = override or {}
     native = ov.get("native_units", attrs.get("units", ""))
@@ -275,6 +276,7 @@ def _var_entry(name: str, attrs: dict, dims, level_dim, group, start, end, overr
         "plev": bool(level_dim and level_dim in dims),
         "group": ov.get("group", group),
         "start": start, "end": end,
+        "frequency": frequency,  # year / month / day / 6hr ... (time strings follow it)
     }
 
 
@@ -469,7 +471,8 @@ class CatalogSource(Source):
             if extra and not self.ensemble_dim:
                 self.ensemble_dim = extra[0]
             self.variables[name] = _var_entry(name, v.get("attrs", {}), v["dims"], lev, v.get("realm") or "",
-                                              v["start"], v["end"], overrides.get(name))
+                                              v["start"], v["end"], overrides.get(name),
+                                              frequency=v.get("frequency") or "month")
             self.variables[name]["missing_months"] = v.get("missing_months", [])
             starts.append(v["start"])
             ends.append(v["end"])
@@ -498,7 +501,8 @@ class CatalogSource(Source):
         g.pop("filename", None)  # per-file
         if "history" in g:       # keep the files' own history; the viewer writes its own
             g["source_history"] = g.pop("history")
-        g["source_files"] = f"{self.catalog['variables'][var]['n_files']} monthly NetCDF files under {', '.join(self.catalog['roots'])}"
+        cv = self.catalog["variables"][var]
+        g["source_files"] = f"{cv['n_files']} {cv.get('frequency', 'month')}ly NetCDF files under {', '.join(self.catalog['roots'])}".replace("dayly", "daily").replace("yearly", "yearly")
         return g
 
 

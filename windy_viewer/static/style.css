@@ -114,7 +114,7 @@ html, body {
   color: var(--ink-2);
 }
 
-.row input[type="month"] {
+.row input[type="month"], .row input[type="date"] {
   background: #242423;
   color: var(--ink);
   border: 1px solid var(--border);

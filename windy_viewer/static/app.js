@@ -1056,14 +1056,31 @@ function toFloat32(rows, nlat, nlon) {
   return a;
 }
 
+// Fractional grid column for a longitude. A global grid (g.wrap) joins
+// column nlon-1 to column 0, so any longitude maps inside it; a regional
+// grid (CONUS, ...) returns -1 for longitudes it does not cover.
+function gridX(g, lon) {
+  let x = (lon - g.lon0) / g.dlon;
+  if (g.wrap === false) {
+    if (x < 0) x = (lon + 360 - g.lon0) / g.dlon;
+    else if (x > g.nlon - 1) x = (lon - 360 - g.lon0) / g.dlon;
+    return x < 0 || x > g.nlon - 1 ? -1 : x;
+  }
+  return ((x % g.nlon) + g.nlon) % g.nlon;
+}
+function gridX1(g, x0) {
+  return g.wrap === false ? Math.min(x0 + 1, g.nlon - 1) : (x0 + 1) % g.nlon;
+}
+
 // Bilinear sample of a flat [nlat*nlon] Float32Array at (lat, lon);
-// wraps across the antimeridian. g holds grid geometry.
+// wraps across the antimeridian on global grids. g holds grid geometry.
 function sampleGrid(g, arr, lat, lon) {
-  const x = ((((lon - g.lon0) / g.dlon) % g.nlon) + g.nlon) % g.nlon;
+  const x = gridX(g, lon);
+  if (x < 0) return null;
   const y = (lat - g.lat0) / g.dlat;
   if (y < 0 || y > g.nlat - 1) return null;
   const x0 = x | 0, y0 = y | 0;
-  const x1 = (x0 + 1) % g.nlon, y1 = Math.min(y0 + 1, g.nlat - 1);
+  const x1 = gridX1(g, x0), y1 = Math.min(y0 + 1, g.nlat - 1);
   const tx = x - x0, ty = y - y0;
   const n = g.nlon;
   const v00 = arr[y0 * n + x0], v10 = arr[y0 * n + x1];
@@ -1082,9 +1099,10 @@ function sampleGrid(g, arr, lat, lon) {
 
 function nearestCell(g, lat, lon) {
   let i = Math.round((lat - g.lat0) / g.dlat);
-  let j = Math.round((lon - g.lon0) / g.dlon);
   i = Math.max(0, Math.min(g.nlat - 1, i));
-  j = ((j % g.nlon) + g.nlon) % g.nlon;
+  const x = gridX(g, lon);
+  if (x < 0) return { value: null, lat: g.lat0 + i * g.dlat, lon };
+  const j = Math.min(g.nlon - 1, Math.round(x));
   const v = g._grid[i * g.nlon + j];
   return {
     value: Number.isNaN(v) ? null : v,
@@ -1114,10 +1132,10 @@ function renderFieldToURL(d, lut, filter) {
   const ctx_ = new Float32Array(W);
   for (let c = 0; c < W; c++) {
     const lon = -180 + (360 * c) / (W - 1);
-    const x = ((((lon - lon0) / dlon) % nlon) + nlon) % nlon;
-    cx0[c] = x | 0;
-    cx1[c] = (cx0[c] + 1) % nlon;
-    ctx_[c] = x - cx0[c];
+    const x = gridX(d, lon);
+    cx0[c] = x < 0 ? -1 : x | 0; // -1: outside a regional grid -> transparent
+    cx1[c] = x < 0 ? -1 : gridX1(d, cx0[c]);
+    ctx_[c] = x < 0 ? 0 : x - cx0[c];
   }
 
   const yMax = Math.log(Math.tan(Math.PI / 4 + (MERC_LAT * Math.PI) / 360));
@@ -1133,6 +1151,7 @@ function renderFieldToURL(d, lut, filter) {
     const row0 = y0 * nlon, row1 = y1 * nlon;
     let k = r * W * 4;
     for (let c = 0; c < W; c++, k += 4) {
+      if (cx0[c] < 0) continue;
       const tx = ctx_[c];
       const v00 = grid[row0 + cx0[c]], v10 = grid[row0 + cx1[c]];
       const v01 = grid[row1 + cx0[c]], v11 = grid[row1 + cx1[c]];
@@ -2144,11 +2163,58 @@ el("cmap-btn").addEventListener("click", (e) => {
 document.addEventListener("click", hideCmapPopover);
 
 // -------------------------------------------------------- controls
+// Time strings follow the variable's frequency: "YYYY-MM" for monthly
+// data, "YYYY-MM-DD" for daily. The two time pickers switch between a
+// month and a date input accordingly; range pickers (time series, box)
+// stay monthly and see month-truncated bounds.
+function timeFreq() {
+  const v = meta && meta.variables[state.var];
+  return (v && v.frequency) || "month";
+}
+function toMonthStr(t) { return (t || "").slice(0, 7); }
+function toDayStr(t, end) {
+  if (!t) return "";
+  if (t.length >= 10) return t.slice(0, 10);
+  if (!end) return `${t}-01`;
+  const [y, m] = t.split("-").map(Number);
+  return `${t}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, "0")}`;
+}
+// `t` in the form the input expects (date inputs reject "YYYY-MM").
+function fitTime(t, input, end) { return input.type === "date" ? toDayStr(t, end) : toMonthStr(t); }
+
+function syncTimeInputs() {
+  const freq = timeFreq();
+  const daily = freq === "day";
+  for (const [id, exp] of [["month-input", state.experiment], ["month-input-b", state.b.experiment]]) {
+    const input = el(id);
+    const type = daily ? "date" : "month";
+    if (input.type !== type) {
+      const old = input.value;
+      input.type = type;
+      input.value = fitTime(old, input);
+    }
+    applyExperimentRange(id, exp);
+  }
+  document.querySelectorAll(".time-word").forEach((w) => (w.textContent = daily ? "Day" : "Month"));
+  // "Play year" and its 12-month strip only make sense for monthly data
+  const monthly = freq === "month";
+  if (!monthly && playback.frames) pausePlayback();
+  el("play-btn").hidden = !monthly;
+  if (!monthly) el("continue-btn").hidden = true;
+  el("play-timeline").hidden = !monthly;
+}
+
 function stepMonth(inputId, delta) {
   const input = el(inputId);
-  const [y, m] = input.value.split("-").map(Number);
-  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
-  const next = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  const [y, m, d0] = input.value.split("-").map(Number);
+  let next;
+  if (input.type === "date") {
+    const d = new Date(Date.UTC(y, m - 1, (d0 || 1) + delta));
+    next = d.toISOString().slice(0, 10);
+  } else {
+    const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+    next = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
   if (next < input.min || next > input.max) return;
   input.value = next;
   loadField();
@@ -2157,9 +2223,9 @@ function stepMonth(inputId, delta) {
 function applyExperimentRange(inputId, experiment) {
   const exp = meta.experiments[experiment];
   const input = el(inputId);
-  input.min = exp.start;
-  input.max = exp.end;
-  if (input.value < exp.start || input.value > exp.end) input.value = exp.start;
+  input.min = fitTime(exp.start, input, false);
+  input.max = fitTime(exp.end, input, true);
+  if (input.value < input.min || input.value > input.max) input.value = input.min;
 }
 
 function buildSeg(containerId, entries, current, onPick, infos) {
@@ -2387,9 +2453,13 @@ function buildVarButtons() {
     const v = meta.variables[k];
     state.var = k;
     state.filter = { lo: null, hi: null }; // filter bounds are per-variable
+    syncTimeInputs(); // the new variable may be daily where the old was monthly
     // variables of one dataset can cover different periods
     const mi = el("month-input");
-    if (v.start && v.end && (mi.value < v.start || mi.value > v.end)) mi.value = v.start;
+    if (v.start && v.end) {
+      const lo = fitTime(v.start, mi, false), hi = fitTime(v.end, mi, true);
+      if (mi.value < lo || mi.value > hi) mi.value = lo;
+    }
     setLabel();
     list.querySelectorAll(".dd-item").forEach((i) =>
       i.classList.toggle("selected", i.dataset.value === k)
@@ -2582,8 +2652,8 @@ async function init() {
     state.experiment,
     (v) => {
       state.experiment = v;
-      // Selecting a scenario jumps to its first available month.
-      el("month-input").value = meta.experiments[v].start;
+      // Selecting a scenario jumps to its first available time step.
+      el("month-input").value = fitTime(meta.experiments[v].start, el("month-input"));
       applyExperimentRange("month-input", v);
       tsRange.start = "";
       tsSetRangeDefaults();
@@ -2597,7 +2667,7 @@ async function init() {
     state.b.experiment,
     (v) => {
       state.b.experiment = v;
-      el("month-input-b").value = meta.experiments[v].start;
+      el("month-input-b").value = fitTime(meta.experiments[v].start, el("month-input-b"));
       applyExperimentRange("month-input-b", v);
       loadField();
     },
@@ -2608,10 +2678,11 @@ async function init() {
   buildMemberDropdown("member-btn-b", "member-list-b", meta.members,
     () => state.b.member, (m) => (state.b.member = m));
 
-  el("month-input").value =
-    (sameDataset && SAVED.timeA) || meta.experiments[state.experiment].start;
-  el("month-input-b").value =
-    (sameDataset && SAVED.timeB) || meta.experiments[state.b.experiment].start;
+  syncTimeInputs(); // picker types follow the variable's frequency
+  el("month-input").value = fitTime(
+    (sameDataset && SAVED.timeA) || meta.experiments[state.experiment].start, el("month-input"));
+  el("month-input-b").value = fitTime(
+    (sameDataset && SAVED.timeB) || meta.experiments[state.b.experiment].start, el("month-input-b"));
   // a remembered month outside the experiment (or the variable's own period) jumps to the start
   for (const [id, exp] of [["month-input", state.experiment], ["month-input-b", state.b.experiment]]) {
     const e = meta.experiments[exp];
@@ -2787,8 +2858,13 @@ function targetInfoByIdx(idx) {
 // re-created every time the popup content re-renders.
 const tsRange = { start: "", end: "" };
 
+// Range pickers work in months; a daily dataset's bounds are day-stamped.
+function expMonths(exp) {
+  return { ...exp, start: toMonthStr(exp.start), end: toMonthStr(exp.end) };
+}
+
 function tsSetRangeDefaults() {
-  const exp = meta.experiments[state.experiment];
+  const exp = expMonths(meta.experiments[state.experiment]);
   if (!tsRange.start || tsRange.start < exp.start || tsRange.start > exp.end) {
     tsRange.start = exp.start;
     const [y] = exp.start.split("-").map(Number);
@@ -2817,7 +2893,7 @@ function tsRangeChanged(input, which) {
     refreshReadout();
     return;
   }
-  const exp = meta.experiments[state.experiment];
+  const exp = expMonths(meta.experiments[state.experiment]);
   if (v < exp.start) v = exp.start;
   if (v > exp.end) v = exp.end;
   tsRange[which] = v;
@@ -3075,6 +3151,7 @@ const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 function buildIdleTimeline() {
   const bar = el("play-timeline");
   bar.innerHTML = "";
+  if (timeFreq() !== "month") { bar.hidden = true; return; }
   const current = el("month-input").value;
   for (const s of playbackMonths()) {
     const [y, m] = s.split("-").map(Number);
@@ -3346,6 +3423,7 @@ function globeRender(fast) {
   const pX = pc && pc.xOff, pRow = pc && pc.row, pTy = pc && pc.ty, pShade = pc && pc.shade;
   const lon0 = globe.lon0;
   const nlon = d.nlon, total = d.nlat * d.nlon;
+  const wrap = d.wrap !== false, period = 360 / d.dlon;
   const shift = (lon0 - d.lon0) / d.dlon; // grid x of the view-centre meridian
   const ld = lut.data, lmin = lut.min, lscale = lut.scale, llast = lut.last;
   for (let iy = y0; iy < y1; iy++) {
@@ -3360,12 +3438,18 @@ function globeRender(fast) {
         // cache, the column is the cached offset plus this frame's shift
         const r0 = pRow[k1];
         v = null;
-        if (r0 >= 0) {
-          let xw = (pX[k1] + shift) % nlon;
+        let xw = pX[k1] + shift;
+        if (wrap) {
+          xw %= nlon;
           if (xw < 0) xw += nlon;
+        } else {
+          if (xw < 0) xw += period;
+          else if (xw > nlon - 1) xw -= period;
+        }
+        if (r0 >= 0 && xw >= 0 && xw <= nlon - 1) {
           const xi = xw | 0;
           const tx = xw - xi;
-          const xj = xi + 1 === nlon ? 0 : xi + 1;
+          const xj = wrap ? (xi + 1 === nlon ? 0 : xi + 1) : Math.min(xi + 1, nlon - 1);
           const r1 = r0 + nlon < total ? r0 + nlon : r0;
           const ty = pTy[k1];
           const v00 = grid[r0 + xi], v10 = grid[r0 + xj], v01 = grid[r1 + xi], v11 = grid[r1 + xj];
@@ -4987,7 +5071,7 @@ function boxRefresh() {
     `${boxStatText()}${v.plev ? ` · ${state.plev} hPa` : ""}`;
 
   // month range: default to the displayed month; keep inside the scenario
-  const exp = meta.experiments[state.experiment];
+  const exp = expMonths(meta.experiments[state.experiment]);
   const cur = el("month-input").value || exp.start;
   const inExp = (m) => /^\d{4}-\d{2}$/.test(m) && m >= exp.start && m <= exp.end;
   if (!inExp(box.range.start)) box.range.start = inExp(cur) ? cur : exp.start;
@@ -5143,7 +5227,7 @@ function boxRangeChanged(which) {
     boxRefresh();
     return;
   }
-  const exp = meta.experiments[state.experiment];
+  const exp = expMonths(meta.experiments[state.experiment]);
   if (v < exp.start) v = exp.start;
   if (v > exp.end) v = exp.end;
   box.range[which] = v;
@@ -5520,11 +5604,12 @@ function contourSegments(d, levels) {
   const nl = levels.length;
   const segs = levels.map(() => []);
   const W = nlon + 1;
+  const jEnd = d.wrap === false ? nlon - 1 : nlon; // regional grids have no seam cell
   const pt = [null, null, null, null]; // bottom, right, top, left
   for (let i = 0; i < nlat - 1; i++) {
     const latA = lat0 + i * dlat, latB = latA + dlat;
     const rowA = i * nlon, rowB = rowA + nlon;
-    for (let j = 0; j < nlon; j++) {
+    for (let j = 0; j < jEnd; j++) {
       const j1 = j + 1 === nlon ? 0 : j + 1;
       const v00 = g[rowA + j], v10 = g[rowA + j1], v01 = g[rowB + j], v11 = g[rowB + j1];
       if (v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) continue;
