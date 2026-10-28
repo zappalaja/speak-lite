@@ -1,6 +1,6 @@
-# SPEAR windy viewer — podman/docker compatible.
-#   podman build -t spear-windy .
-#   podman run --rm -p 8601:8601 --env-file .env spear-windy
+# windy viewer — podman/docker compatible.
+#   podman build -t windy-viewer .
+#   podman run --rm -p 8601:8601 --env-file .env -v $PWD/datasets.json:/app/datasets.json:ro windy-viewer
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -17,6 +17,8 @@ RUN python -c "from sentence_transformers import SentenceTransformer; \
 
 COPY windy_viewer/ windy_viewer/
 COPY rag-service/ rag-service/
+COPY tools/ tools/
+COPY datasets.example.json .
 
 ENV VIEWER_HOST=0.0.0.0 \
     VIEWER_PORT=8601 \

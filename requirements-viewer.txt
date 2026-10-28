@@ -1,0 +1,18 @@
+# Viewer + catalog tool only (no SPEAK document retrieval): no torch/chromadb.
+# Requires Python >= 3.12. For the full install use requirements.txt.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+requests>=2.32
+numpy>=2.0
+xarray>=2024.7
+zarr>=3.0
+icechunk>=1.0
+arraylake>=1.0
+python-dotenv>=1.0
+matplotlib>=3.9
+netCDF4>=1.7
+
+# Local NetCDF collections as virtual Icechunk stores (tools/nc_catalog.py)
+virtualizarr[hdf,icechunk]>=2.7
+kerchunk>=0.2.10        # NetCDF-3 (classic / 64-bit offset) parser backend
+

@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>SPEAR-MED Viewer</title>
+<title>Climate Data Viewer</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-<link rel="stylesheet" href="style.css?v=9" />
+<link rel="stylesheet" href="style.css?v=20" />
 </head>
 <body>
 <div id="map"></div>
@@ -37,10 +37,8 @@
 <button type="button" id="rotate-btn" class="globe-btn rotate-btn" hidden title="Slowly spin the globe">Start Rotation</button>
 <div id="globe-note" class="globe-note" hidden>Ctrl+click the globe to place or remove a virtual station</div>
 
-<a class="data-access"
-   href="https://noaa-gfdl-spear-large-ensembles-pds.s3.amazonaws.com/index.html#SPEAR/GFDL-LARGE-ENSEMBLES/CMIP/NOAA-GFDL/GFDL-SPEAR-MED/"
-   target="_blank" rel="noopener"
-   title="Browse the public NOAA GFDL SPEAR large-ensemble S3 bucket">Access SPEAR Data</a>
+<a class="data-access" id="data-access" href="#" target="_blank" rel="noopener" hidden
+   title="Browse the source data">Access Data</a>
 
 <div class="play-bar">
   <button type="button" id="play-btn" class="play-btn" title="Animate 12 months from the selected date">&#9654; Play year</button>
@@ -85,16 +83,17 @@
     </label>
     <div class="box-cells" id="box-cells"></div>
     <div class="ts-range box-range">
-      <span>Months</span>
-      <input type="month" id="box-start" />
+      <span>Months <span class="info-i" id="box-month-info">&#9432;</span></span>
+      <input type="text" inputmode="numeric" placeholder="YYYY-MM" maxlength="7" id="box-start" />
       <span>to</span>
-      <input type="month" id="box-end" />
+      <input type="text" inputmode="numeric" placeholder="YYYY-MM" maxlength="7" id="box-end" />
     </div>
     <div class="box-note" id="box-note"></div>
     <div class="ts-card-actions box-actions">
       <button type="button" id="box-dl-nc" title="NetCDF with full metadata">&#8595; NetCDF</button>
       <button type="button" id="box-dl-csv" title="CSV (time, lat, lon, value) with metadata header">&#8595; CSV</button>
       <button type="button" id="box-dl-png" title="PNG image of just the box contents (map view, current month)">&#8595; PNG</button>
+      <button type="button" id="box-dl-gif" title="Animated GIF of just the box contents, one frame per month (or day) over the Months range above; frame time, Every N and size follow the GIF settings under Download">&#8595; GIF</button>
     </div>
   </div>
 </div>
@@ -108,13 +107,14 @@
   <div class="chat-header" id="chat-header">
     <span class="chat-title">Ask SPEAK <span class="info-i" id="ask-info-2">&#9432;</span></span>
     <span class="chat-header-btns">
+      <button type="button" id="chat-context" class="chat-context-btn" title="Show what SPEAK can see: the on-screen statistics and extracted series it is given with your questions">Context</button>
       <button type="button" id="chat-max" title="Expand / shrink">&#x26F6;</button>
       <button type="button" id="chat-min" title="Minimize">&#8213;</button>
       <button type="button" id="chat-close" title="Close">&#10005;</button>
     </span>
   </div>
   <div class="chat-messages" id="chat-messages">
-    <div class="chat-msg bot">Hi! Ask me about the data on screen, comparisons, the SPEAR model, or its variables. I can see the current selection, its statistics, and any virtual stations placed.</div>
+    <div class="chat-msg bot">Hi! Ask me about the data on screen, comparisons, the model or reanalysis behind it, or its variables. I can see the current selection, its statistics, and any virtual stations placed.</div>
   </div>
   <form class="chat-input" id="chat-form">
     <textarea id="chat-text" rows="2" placeholder="Ask about what you see&hellip;"></textarea>
@@ -123,25 +123,30 @@
 </div>
 
 <div class="panel" id="panel">
-  <div class="panel-title"><a class="brand-link" href="https://www.gfdl.noaa.gov/spear/" target="_blank" rel="noopener" title="Open the NOAA GFDL SPEAR homepage">SPEAR-MED</a> <span class="sub">GFDL large ensemble · v31</span></div>
+  <div class="panel-resizer" id="panel-resizer" title="Drag to make the panel wider or narrower (double-click to reset)"></div>
+  <div class="panel-title"><a class="brand-link" id="brand-link" href="#" target="_blank" rel="noopener"></a> <span class="sub" id="brand-sub"></span></div>
 
-  <div class="row row-col">
-    <span class="group-hint" title="GFDL AM4.0, 0.5&deg; Resolution">Atmospheric (Monthly)</span>
-    <div class="seg" id="var-seg-sfc"></div>
-    <span class="subgroup-title">Pressure levels</span>
-    <div class="row plev-inline">
-      <span>Level</span>
-      <div class="dropdown">
-        <button type="button" class="dd-btn" id="plev-btn"></button>
-        <div class="dd-list" id="plev-list" hidden></div>
-      </div>
-    </div>
-    <div class="seg" id="var-seg-plev"></div>
+  <div class="row row-col" id="dataset-row" hidden>
+    <span>Dataset</span>
+    <div class="seg" id="dataset-seg"></div>
   </div>
 
-  <div class="row row-col">
-    <span class="group-hint" title="GFDL MOM6, 1.0&deg; Resolution">Ocean (Monthly)</span>
-    <div class="seg" id="var-seg-ocean"></div>
+  <!-- variable picker: one dropdown, items grouped by realm/group (built from /api/meta) -->
+  <div class="row row-col" id="var-row">
+    <span>Variable</span>
+    <div class="dropdown var-dropdown">
+      <button type="button" class="dd-btn" id="var-btn"></button>
+      <div class="dd-list" id="var-list" hidden></div>
+    </div>
+    <span class="var-long" id="var-long"></span>
+  </div>
+  <!-- shown only when the dataset has pressure-level variables -->
+  <div class="row" id="plev-holder" hidden>
+    <span>Level</span>
+    <div class="dropdown">
+      <button type="button" class="dd-btn" id="plev-btn"></button>
+      <div class="dd-list" id="plev-list" hidden></div>
+    </div>
   </div>
 
   <div class="row row-col">
@@ -149,12 +154,12 @@
     <div class="seg" id="unit-seg"></div>
   </div>
 
-  <div class="row row-col">
-    <span>Experimental Scenario</span>
+  <div class="row row-col" id="exp-row">
+    <span>Experiment</span>
     <div class="seg" id="exp-seg"></div>
   </div>
 
-  <div class="row">
+  <div class="row" id="member-row">
     <span>Member</span>
     <div class="dropdown">
       <button type="button" class="dd-btn" id="member-btn"></button>
@@ -162,13 +167,13 @@
     </div>
   </div>
 
-  <div class="row row-col">
+  <div class="row row-col" id="stat-row">
     <span>Statistic</span>
     <div class="seg" id="stat-seg"></div>
   </div>
 
   <div class="row">
-    <span>Month <span class="info-i" id="month-info-a">&#9432;</span></span>
+    <span><span class="time-word">Month</span> <span class="info-i" id="month-info-a">&#9432;</span></span>
     <div class="month-controls">
       <button id="prev-month" title="Previous month">&#8249;</button>
       <input type="month" id="month-input" />
@@ -184,12 +189,12 @@
   <div id="compare-block" hidden>
     <div class="compare-title">Selection B</div>
 
-    <div class="row row-col">
-      <span>Experimental Scenario</span>
+    <div class="row row-col" id="exp-row-b">
+      <span>Experiment</span>
       <div class="seg" id="exp-seg-b"></div>
     </div>
 
-    <div class="row">
+    <div class="row" id="member-row-b">
       <span>Member</span>
       <div class="dropdown">
         <button type="button" class="dd-btn" id="member-btn-b"></button>
@@ -197,13 +202,13 @@
       </div>
     </div>
 
-    <div class="row row-col">
+    <div class="row row-col" id="stat-row-b">
       <span>Statistic</span>
       <div class="seg" id="stat-seg-b"></div>
     </div>
 
     <div class="row">
-      <span>Month <span class="info-i" id="month-info-b">&#9432;</span></span>
+      <span><span class="time-word">Month</span> <span class="info-i" id="month-info-b">&#9432;</span></span>
       <div class="month-controls">
         <button id="prev-month-b" title="Previous month">&#8249;</button>
         <input type="month" id="month-input-b" />
@@ -218,6 +223,11 @@
   </label>
 
   <label class="row">
+    <span>Grid cells <span class="info-i" id="cells-info">&#9432;</span></span>
+    <input type="checkbox" id="cells-toggle" />
+  </label>
+
+  <label class="row" id="wind-row">
     <span>Wind animation</span>
     <input type="checkbox" id="particles-toggle" checked />
   </label>
@@ -251,12 +261,38 @@
     <div class="contour-summary" id="contour-summary"></div>
   </div>
 
-  <div class="row">
+  <div class="row row-col">
     <span>Download</span>
     <div class="dl-buttons">
       <button type="button" id="dl-nc" title="NetCDF with full metadata">&#8595; NetCDF</button>
       <button type="button" id="dl-csv" title="CSV with metadata header">&#8595; CSV</button>
       <button type="button" id="dl-png" title="PNG image of the current map or globe view — no panels; includes whatever labels, lat/lon lines, contours and stations are shown">&#8595; PNG</button>
+      <button type="button" id="dl-gif" title="Animated GIF of the map or globe view stepping through a time range — pick the range, frame time and size below">&#8595; GIF</button>
+    </div>
+  </div>
+
+  <div class="gif-card" id="gif-card" hidden>
+    <div class="gif-title">Animated GIF <span class="info-i" id="gif-info">&#9432;</span></div>
+    <div class="ts-range gif-range">
+      <span>From</span>
+      <input type="text" inputmode="numeric" placeholder="YYYY-MM" maxlength="10" id="gif-start" />
+      <span>to</span>
+      <input type="text" inputmode="numeric" placeholder="YYYY-MM" maxlength="10" id="gif-end" />
+    </div>
+    <div class="ts-range gif-range">
+      <label title="How long each time step shows, in milliseconds">Frame <input type="number" id="gif-delay" min="50" max="10000" step="50" value="500" /> ms</label>
+    </div>
+    <div class="ts-range gif-range">
+      <label title="Use every Nth time step: 12 on monthly data gives one frame per year, 7 on daily data one per week">Every <input type="number" id="gif-stride" min="1" max="366" step="1" value="1" /> <span id="gif-stride-unit">months</span></label>
+    </div>
+    <div class="ts-range gif-range">
+      <span title="Caps the frame width; smaller frames make a much smaller file">Size</span>
+      <div class="seg gif-size-seg" id="gif-size-seg"></div>
+    </div>
+    <div class="box-note gif-note" id="gif-note"></div>
+    <div class="ts-card-actions box-actions gif-actions">
+      <button type="button" id="gif-make" title="Step through every time in the range and save the frames as one animated GIF">&#8595; Create GIF</button>
+      <button type="button" id="gif-close">Close</button>
     </div>
   </div>
 
@@ -269,7 +305,10 @@
       <div class="legend-handle" id="legend-handle-hi" title="Drag to set upper bound"></div>
     </div>
     <div class="legend-ticks" id="legend-ticks"></div>
-    <div class="legend-units" id="legend-units"></div>
+    <div class="legend-foot">
+      <button type="button" id="cmap-btn" class="cmap-btn" title="Choose a colour scale"><canvas id="cmap-swatch" width="28" height="8"></canvas><span class="cmap-caret">&#9662;</span></button>
+      <div class="legend-units" id="legend-units"></div>
+    </div>
     <div class="filter-title">Filter Values</div>
     <div class="filter-row">
       <label>Above <input type="number" id="filter-lo" step="any" placeholder="&mdash;" /></label>
@@ -284,6 +323,11 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="config.js"></script>
-<script src="app.js?v=32"></script>
+<script type="module">
+  // GIF encoder for the animated export (vendored; see vendor/gifenc.LICENSE.md)
+  import { GIFEncoder, quantize, applyPalette } from "./vendor/gifenc.esm.js";
+  window.GIFENC = { GIFEncoder, quantize, applyPalette };
+</script>
+<script src="app.js?v=66"></script>
 </body>
 </html>

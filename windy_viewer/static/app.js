@@ -1,12 +1,24 @@
-/* SPEAR-MED windy-style viewer frontend.
+/* Windy-style viewer frontend for gridded monthly climate data.
  *
- * Fetches (var, experiment, member|ensmean, month) fields from /api/field
+ * Everything dataset-specific (title, variables, experiments, ensemble
+ * members, levels, wind pairs, units) comes from /api/meta; `meta` holds
+ * the active dataset and switching datasets reloads the page.
+ *
+ * Fetches (dataset, var, experiment, member|ensmean, month) fields from /api/field
  * and renders them as colormapped rasters reprojected to Web Mercator.
  * Compare mode fetches two selections (A, B) and renders A − B with a
  * diverging colormap auto-scaled to the difference field. A canvas
  * particle layer advects particles through the uas/vas wind field.
  */
 "use strict";
+
+// The app may be served under a path prefix by a reverse proxy
+// (https://host/some-prefix/ -> the server's /). API calls are made relative
+// to the page's own directory so they go through the same prefix.
+const API = (() => {
+  const p = location.pathname;
+  return (p.endsWith("/") ? p.slice(0, -1) : p.replace(/\/[^/]*$/, "")).replace(/\/+$/, "");
+})();
 
 // ---------------------------------------------------------------- colormaps
 // Windy-style multi-hue ramps. stops: value (display units), rgb, alpha.
@@ -142,9 +154,59 @@ const VAR_CONFIG = {
 const RAMPS = {
   thermal: [[135, 68, 153], [57, 97, 207], [85, 195, 205], [116, 208, 140],
             [228, 205, 66], [231, 153, 53], [200, 50, 68]],
-  plasma: [[13, 8, 135], [126, 3, 168], [203, 71, 119], [248, 149, 64], [240, 249, 33]],
   blues: [[25, 35, 80], [24, 79, 149], [57, 135, 229], [122, 184, 240], [205, 226, 251]],
+  // user-selectable alternatives: matplotlib colormaps sampled at 17 points
+  viridis: [[68, 1, 84], [72, 24, 106], [71, 45, 123], [66, 64, 134], [59, 82, 139], [51, 99, 141], [44, 114, 142], [38, 130, 142], [33, 145, 140], [31, 160, 136], [40, 174, 128], [63, 188, 115], [94, 201, 98], [132, 212, 75], [173, 220, 48], [216, 226, 25], [253, 231, 37]],
+  plasma: [[13, 8, 135], [49, 5, 151], [76, 2, 161], [102, 0, 167], [126, 3, 168], [149, 17, 161], [170, 35, 149], [188, 53, 135], [204, 71, 120], [218, 90, 106], [230, 108, 92], [240, 128, 78], [248, 149, 64], [253, 172, 51], [253, 197, 39], [248, 223, 37], [240, 249, 33]],
+  inferno: [[0, 0, 4], [11, 7, 36], [33, 12, 74], [61, 9, 101], [87, 16, 110], [113, 25, 110], [138, 34, 106], [163, 44, 97], [188, 55, 84], [210, 70, 68], [228, 90, 49], [241, 115, 29], [249, 142, 9], [252, 172, 17], [249, 203, 53], [242, 234, 105], [252, 255, 164]],
+  magma: [[0, 0, 4], [10, 8, 34], [29, 17, 71], [54, 16, 107], [81, 18, 124], [106, 28, 129], [131, 38, 129], [156, 46, 127], [183, 55, 121], [208, 65, 111], [231, 82, 99], [245, 107, 92], [252, 137, 97], [254, 167, 114], [254, 196, 136], [253, 226, 163], [252, 253, 191]],
+  cividis: [[0, 34, 78], [0, 46, 106], [26, 56, 111], [50, 67, 109], [67, 78, 108], [83, 90, 109], [97, 101, 111], [111, 112, 115], [125, 124, 120], [140, 136, 120], [155, 148, 118], [171, 160, 114], [188, 174, 108], [205, 187, 99], [222, 201, 88], [240, 216, 70], [254, 232, 56]],
+  turbo: [[48, 18, 59], [64, 64, 162], [70, 107, 227], [66, 148, 255], [40, 188, 235], [24, 221, 194], [50, 242, 152], [109, 254, 98], [164, 252, 60], [205, 236, 52], [238, 207, 58], [253, 172, 52], [251, 126, 33], [235, 80, 14], [208, 47, 5], [169, 22, 1], [122, 4, 3]],
+  ylorrd: [[255, 255, 204], [255, 246, 182], [255, 237, 160], [254, 227, 139], [254, 217, 118], [254, 197, 97], [254, 178, 76], [253, 159, 68], [253, 140, 60], [252, 108, 51], [252, 77, 42], [239, 51, 35], [226, 25, 28], [207, 12, 33], [187, 0, 38], [157, 0, 38], [128, 0, 38]],
+  ylgnbu: [[255, 255, 217], [246, 251, 197], [237, 248, 177], [218, 240, 179], [198, 233, 180], [162, 219, 184], [126, 205, 187], [95, 193, 192], [64, 181, 196], [46, 163, 194], [29, 144, 192], [32, 118, 179], [34, 93, 168], [36, 72, 157], [36, 51, 146], [22, 40, 116], [8, 29, 88]],
+  gnbu: [[247, 252, 240], [235, 247, 229], [224, 243, 219], [214, 239, 208], [204, 235, 197], [186, 228, 189], [167, 221, 181], [145, 212, 189], [122, 204, 196], [100, 191, 204], [77, 178, 211], [60, 159, 200], [42, 139, 190], [25, 121, 181], [8, 103, 171], [8, 83, 149], [8, 64, 129]],
+  greens: [[247, 252, 245], [238, 248, 234], [229, 245, 224], [214, 239, 208], [199, 233, 192], [180, 225, 173], [160, 217, 155], [138, 206, 136], [115, 196, 118], [90, 183, 105], [64, 170, 93], [49, 154, 80], [34, 138, 68], [17, 123, 56], [0, 108, 44], [0, 87, 35], [0, 68, 27]],
+  oranges: [[255, 245, 235], [254, 237, 220], [254, 230, 206], [253, 219, 184], [253, 208, 162], [253, 191, 134], [253, 174, 106], [253, 157, 83], [253, 140, 59], [247, 122, 39], [241, 104, 19], [228, 88, 10], [216, 72, 1], [190, 63, 2], [165, 54, 3], [145, 46, 4], [127, 39, 4]],
+  reds: [[255, 245, 240], [254, 234, 225], [254, 224, 210], [253, 205, 185], [252, 187, 161], [252, 166, 137], [252, 146, 114], [251, 125, 93], [251, 105, 74], [245, 82, 58], [238, 58, 44], [220, 41, 36], [202, 24, 29], [183, 19, 25], [163, 15, 21], [132, 7, 17], [103, 0, 13]],
+  purples: [[252, 251, 253], [245, 244, 249], [239, 237, 245], [228, 227, 240], [218, 218, 235], [203, 203, 227], [188, 189, 220], [173, 171, 210], [158, 154, 200], [142, 139, 193], [128, 124, 186], [117, 102, 174], [105, 80, 163], [94, 59, 152], [83, 38, 143], [73, 18, 133], [63, 0, 125]],
+  bluesmpl: [[247, 251, 255], [234, 243, 251], [222, 235, 247], [210, 227, 243], [198, 219, 239], [178, 210, 232], [157, 202, 225], [132, 188, 219], [106, 174, 214], [86, 160, 206], [65, 145, 198], [49, 129, 189], [32, 112, 180], [20, 96, 168], [8, 80, 155], [8, 64, 130], [8, 48, 107]],
+  hot: [[11, 0, 0], [53, 0, 0], [95, 0, 0], [137, 0, 0], [179, 0, 0], [221, 0, 0], [255, 8, 0], [255, 50, 0], [255, 92, 0], [255, 134, 0], [255, 176, 0], [255, 218, 0], [255, 255, 7], [255, 255, 70], [255, 255, 133], [255, 255, 196], [255, 255, 255]],
+  jet: [[0, 0, 128], [0, 0, 200], [0, 0, 255], [0, 64, 255], [0, 128, 255], [0, 192, 255], [22, 255, 225], [73, 255, 173], [125, 255, 122], [177, 255, 70], [228, 255, 19], [255, 208, 0], [255, 148, 0], [255, 89, 0], [255, 30, 0], [196, 0, 0], [128, 0, 0]],
+  rainbow: [[128, 0, 255], [96, 50, 254], [64, 98, 250], [32, 142, 244], [0, 181, 235], [32, 213, 225], [64, 236, 212], [96, 250, 197], [128, 255, 180], [160, 250, 161], [192, 235, 141], [224, 211, 119], [255, 179, 96], [255, 140, 73], [255, 95, 48], [255, 47, 24], [255, 0, 0]],
+  ocean: [[0, 128, 0], [0, 104, 16], [0, 80, 32], [0, 56, 48], [0, 32, 64], [0, 8, 80], [0, 16, 96], [0, 40, 112], [0, 64, 128], [0, 88, 144], [0, 112, 160], [18, 136, 176], [66, 160, 192], [114, 185, 208], [162, 208, 224], [210, 232, 240], [255, 255, 255]],
+  terrain: [[51, 51, 153], [30, 94, 196], [8, 136, 238], [0, 172, 196], [1, 204, 102], [65, 217, 115], [129, 230, 128], [193, 243, 141], [254, 254, 152], [222, 213, 135], [190, 172, 118], [158, 131, 101], [129, 94, 86], [161, 135, 129], [193, 176, 172], [225, 217, 215], [255, 255, 255]],
+  gistearth: [[0, 0, 0], [11, 21, 117], [21, 57, 120], [32, 89, 123], [43, 115, 126], [52, 133, 118], [59, 142, 98], [67, 151, 79], [94, 160, 75], [127, 168, 83], [153, 175, 88], [180, 182, 93], [189, 171, 98], [200, 167, 121], [218, 183, 160], [236, 211, 206], [253, 251, 251]],
+  cubehelix: [[0, 0, 0], [21, 11, 29], [27, 30, 59], [23, 55, 77], [22, 83, 76], [35, 106, 62], [68, 119, 49], [114, 123, 50], [161, 121, 74], [197, 122, 118], [212, 132, 169], [209, 152, 212], [198, 180, 238], [193, 209, 243], [203, 232, 240], [227, 246, 240], [255, 255, 255]],
+  twilight: [[226, 217, 226], [196, 206, 212], [149, 181, 199], [114, 151, 193], [98, 118, 186], [94, 81, 173], [89, 42, 143], [69, 19, 92], [47, 20, 54], [74, 19, 66], [116, 30, 79], [152, 53, 80], [178, 86, 82], [194, 124, 99], [204, 163, 137], [216, 199, 190], [226, 217, 226]],
+  rdbu: [[5, 48, 97], [23, 82, 144], [42, 113, 178], [63, 142, 192], [107, 172, 209], [155, 201, 224], [194, 221, 236], [224, 236, 243], [247, 246, 246], [251, 229, 216], [251, 204, 180], [245, 170, 137], [228, 128, 102], [208, 85, 72], [186, 40, 50], [147, 14, 38], [103, 0, 31]],
+  coolwarm: [[59, 76, 192], [78, 104, 216], [98, 130, 234], [119, 154, 247], [141, 176, 254], [163, 194, 254], [185, 208, 249], [204, 217, 237], [221, 220, 220], [236, 211, 197], [245, 196, 172], [247, 176, 147], [244, 152, 122], [235, 125, 98], [221, 95, 75], [202, 59, 55], [180, 4, 38]],
+  bwr: [[0, 0, 255], [32, 32, 255], [64, 64, 255], [96, 96, 255], [128, 128, 255], [160, 160, 255], [192, 192, 255], [224, 224, 255], [255, 254, 254], [255, 222, 222], [255, 190, 190], [255, 158, 158], [255, 126, 126], [255, 94, 94], [255, 62, 62], [255, 30, 30], [255, 0, 0]],
+  seismic: [[0, 0, 76], [0, 0, 121], [0, 0, 166], [0, 0, 211], [1, 1, 255], [65, 65, 255], [129, 129, 255], [193, 193, 255], [255, 253, 253], [255, 189, 189], [255, 125, 125], [255, 61, 61], [254, 0, 0], [222, 0, 0], [190, 0, 0], [158, 0, 0], [128, 0, 0]],
+  rdylbu: [[49, 54, 149], [62, 94, 168], [81, 131, 187], [110, 166, 206], [144, 195, 221], [178, 221, 235], [212, 237, 244], [236, 248, 226], [255, 254, 190], [254, 235, 161], [254, 210, 131], [253, 179, 102], [248, 140, 81], [239, 99, 63], [221, 61, 45], [194, 28, 39], [165, 0, 38]],
+  rdylgn: [[0, 104, 55], [16, 134, 71], [45, 161, 85], [93, 185, 97], [135, 203, 103], [173, 220, 111], [205, 234, 131], [232, 245, 159], [255, 254, 190], [254, 235, 157], [254, 210, 127], [253, 179, 101], [248, 140, 81], [239, 99, 63], [221, 61, 45], [194, 28, 39], [165, 0, 38]],
+  brbg: [[84, 48, 5], [119, 69, 8], [153, 93, 19], [185, 123, 41], [207, 162, 86], [226, 199, 135], [241, 223, 179], [246, 237, 215], [244, 245, 245], [215, 238, 235], [180, 226, 219], [135, 208, 197], [88, 176, 167], [45, 143, 135], [12, 113, 105], [1, 85, 75], [0, 60, 48]],
+  puor: [[45, 0, 75], [69, 24, 113], [95, 58, 145], [123, 106, 168], [153, 144, 191], [183, 177, 213], [207, 207, 229], [228, 229, 240], [247, 247, 246], [252, 232, 205], [254, 213, 159], [253, 188, 107], [238, 155, 57], [217, 123, 18], [189, 97, 9], [158, 76, 7], [127, 59, 8]],
+  piyg: [[142, 1, 82], [177, 17, 109], [203, 50, 137], [219, 108, 168], [232, 151, 196], [243, 188, 221], [250, 214, 234], [251, 233, 242], [247, 247, 246], [236, 246, 222], [217, 240, 188], [189, 227, 141], [154, 205, 97], [119, 181, 60], [88, 155, 40], [61, 127, 30], [39, 100, 25]],
+  prgn: [[64, 0, 75], [98, 26, 110], [127, 60, 141], [149, 104, 166], [174, 139, 189], [199, 171, 210], [222, 201, 226], [237, 226, 238], [246, 247, 246], [228, 242, 224], [203, 234, 197], [171, 221, 165], [126, 195, 127], [80, 166, 90], [41, 132, 64], [16, 99, 43], [0, 68, 27]],
+  spectral: [[94, 79, 162], [66, 115, 179], [63, 151, 183], [96, 187, 168], [137, 208, 164], [179, 224, 162], [216, 239, 155], [240, 249, 167], [255, 254, 190], [254, 235, 157], [254, 210, 127], [253, 179, 101], [248, 140, 81], [239, 102, 69], [220, 72, 76], [190, 37, 74], [158, 1, 66]],
 };
+
+// Colour-scale choices offered by the legend's picker. "default" keeps the
+// per-variable scale (Windy-style ramps, or the auto ramp for dynamic
+// fields); any other entry recolours the same value range.
+const CMAP_CHOICES = {
+  seq: [["default", "Default"], ["viridis", "Viridis"], ["plasma", "Plasma"], ["inferno", "Inferno"], ["magma", "Magma"], ["cividis", "Cividis"], ["turbo", "Turbo"], ["ylorrd", "Yellow–Red"], ["ylgnbu", "Yellow–Blue"], ["gnbu", "Green–Blue"], ["greens", "Greens"], ["oranges", "Oranges"], ["reds", "Reds"], ["purples", "Purples"], ["bluesmpl", "Blues"], ["hot", "Hot"], ["jet", "Jet"], ["rainbow", "Rainbow"], ["ocean", "Ocean"], ["terrain", "Terrain"], ["gistearth", "Earth"], ["cubehelix", "Cubehelix"], ["twilight", "Twilight"]],
+  div: [["default", "Default"], ["rdbu", "Blue–Red"], ["coolwarm", "Cool–Warm"], ["bwr", "Blue–White–Red"], ["seismic", "Seismic"], ["rdylbu", "Blue–Yellow–Red"], ["rdylgn", "Green–Yellow–Red"], ["brbg", "Brown–Green"], ["puor", "Orange–Purple"], ["piyg", "Pink–Green"], ["prgn", "Purple–Green"], ["spectral", "Spectral"]],
+};
+// The choice is remembered per variable (like the display unit): switching
+// variables shows each one's own default unless you changed it before.
+function cmapOverride(kind, varName = state.var) {
+  const id = state.cmap && state.cmap[kind] && state.cmap[kind][varName];
+  return id && id !== "default" && RAMPS[id] ? id : null;
+}
+function cmapChoice(kind, varName = state.var) {
+  return cmapOverride(kind, varName) || "default";
+}
 
 // Display-unit options per variable. Data stays in base units everywhere
 // (colormaps are keyed to physical values, so the raster never re-renders);
@@ -197,8 +259,47 @@ const UNITS = {
   ],
 };
 
+// Variables the built-in tables don't know (any non-SPEAR dataset) fall
+// back to their unit family from /api/meta, and finally to the native
+// units with a dynamic colour scale.
+const FAMILY_UNITS = {
+  temp: TEMP_UNITS, precip: UNITS.pr, pressure: UNITS.psl, wind: WIND_UNITS,
+  radiation: RAD_UNITS, length: UNITS.zg, ratio: UNITS.hus,
+};
+const FAMILY_CONFIG = {
+  temp: VAR_CONFIG.tas, precip: VAR_CONFIG.pr, pressure: VAR_CONFIG.psl,
+  radiation: VAR_CONFIG.rlut, length: VAR_CONFIG.zg, ratio: VAR_CONFIG.hus,
+};
+const GENERIC_UNIT_CACHE = {};
+
+function varFamily(varName) {
+  const v = meta && meta.variables[varName];
+  return v ? v.family : "other";
+}
+
+function unitOptionsFor(varName) {
+  if (UNITS[varName]) return UNITS[varName];
+  const fam = varFamily(varName);
+  if (FAMILY_UNITS[fam]) return FAMILY_UNITS[fam];
+  if (!GENERIC_UNIT_CACHE[varName]) {
+    const u = (meta && meta.variables[varName] && meta.variables[varName].units) || "";
+    GENERIC_UNIT_CACHE[varName] = [{ id: "native", label: u || "native", scale: 1, offset: 0, unit: u, decimals: 2 }];
+  }
+  return GENERIC_UNIT_CACHE[varName];
+}
+
+function varConfigFor(varName) {
+  if (VAR_CONFIG[varName]) return VAR_CONFIG[varName];
+  const fam = varFamily(varName);
+  if (fam === "wind") {
+    return /speed|sfcwind|wspd|mag/i.test(varName)
+      ? VAR_CONFIG.sfcWind : { decimals: 1, dynamic: "div" };
+  }
+  return FAMILY_CONFIG[fam] || { decimals: 2, dynamic: "seq", ramp: "thermal" };
+}
+
 function unitSpecFor(varName) {
-  const opts = UNITS[varName];
+  const opts = unitOptionsFor(varName);
   return opts.find((u) => u.id === state.units[varName]) || opts[0];
 }
 
@@ -271,20 +372,31 @@ function colormap(stops, v, out) {
 
 // Precomputed color lookup tables make the 2M-pixel raster render fast
 // enough to not freeze the UI (a per-pixel stop search is ~20x slower).
+// Colour function for a fixed-stop variable: the variable's own stops, or
+// the chosen ramp over the same value range (transparency of the original
+// stops kept, e.g. zero precipitation stays see-through).
+function fixedColorFn(stops) {
+  const ov = cmapOverride("seq");
+  if (!ov) return (v, out) => colormap(stops, v, out);
+  const min = stops[0].v, max = stops[stops.length - 1].v;
+  const tmp = [0, 0, 0, 0];
+  return (v, out) => {
+    colormap(stops, v, tmp);
+    if (tmp[3] === 0 && (v == null || Number.isNaN(v))) { out[3] = 0; return out; }
+    rampColor(ov, (v - min) / (max - min), 1, out);
+    out[3] = tmp[3];
+    return out;
+  };
+}
+
 const lutCache = {};
 function buildLUT(varName) {
-  if (lutCache[varName]) return lutCache[varName];
-  const stops = VAR_CONFIG[varName].stops;
-  const N = 1024;
+  const key = `${varName}|${cmapOverride("seq") || "default"}`;
+  if (lutCache[key]) return lutCache[key];
+  const stops = varConfigFor(varName).stops;
   const min = stops[0].v;
   const max = stops[stops.length - 1].v;
-  const data = new Uint8ClampedArray(N * 4);
-  const rgba = [0, 0, 0, 0];
-  for (let i = 0; i < N; i++) {
-    colormap(stops, min + ((max - min) * i) / (N - 1), rgba);
-    data.set(rgba, i * 4);
-  }
-  return (lutCache[varName] = { min, max, scale: (N - 1) / (max - min), last: N - 1, data });
+  return (lutCache[key] = makeLUT(min, max, fixedColorFn(stops)));
 }
 
 // Diverging colormap for compare mode: blue where A < B, red where A > B,
@@ -319,8 +431,23 @@ function makeLUT(min, max, colorFn) {
   return { min, max, scale: (N - 1) / (max - min), last: N - 1, data };
 }
 
+// Colour function for a diverging field (A−B, deviation): the built-in
+// blue/grey/red scale or a chosen diverging ramp, both fading near zero.
+function divColorFn(limit) {
+  const ov = cmapOverride("div");
+  if (!ov) return (v, out) => diffColor(v, limit, out);
+  return (v, out) => {
+    if (v == null || Number.isNaN(v)) { out[3] = 0; return out; }
+    let t = v / limit;
+    if (t > 1) t = 1; else if (t < -1) t = -1;
+    const a = Math.abs(t);
+    rampColor(ov, (t + 1) / 2, a < 0.04 ? (a / 0.04) * 0.15 : 0.15 + ((a - 0.04) / 0.96) * 0.75, out);
+    return out;
+  };
+}
+
 function buildDiffLUT(limit) {
-  return makeLUT(-limit, limit, (v, out) => diffColor(v, limit, out));
+  return makeLUT(-limit, limit, divColorFn(limit));
 }
 
 // ---- dynamic (auto-scaled) colormaps for pressure-level fields
@@ -356,20 +483,21 @@ function buildDynamicLUT(f, cfg) {
     const [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
     const L = niceLimit(Math.max(Math.abs(lo), Math.abs(hi)));
     f._dyn = { min: -L, max: L, limit: L, div: true };
-    return makeLUT(-L, L, (v, out) => diffColor(v, L, out));
+    return makeLUT(-L, L, divColorFn(L));
   }
   let [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
   if (!(hi > lo)) hi = lo + 1;
-  f._dyn = { min: lo, max: hi, ramp: cfg.ramp };
+  const ramp = cmapOverride("seq") || cfg.ramp;
+  f._dyn = { min: lo, max: hi, ramp };
   return makeLUT(lo, hi, (v, out) =>
-    rampColor(cfg.ramp, (v - lo) / (hi - lo), 0.88, out)
+    rampColor(ramp, (v - lo) / (hi - lo), 0.88, out)
   );
 }
 
 // LUT choice per statistic: spread is always dynamic-sequential, deviation
 // always dynamic-diverging (centered on zero); otherwise the variable's own.
 function lutForField(f) {
-  const cfg = VAR_CONFIG[f.var];
+  const cfg = varConfigFor(f.var);
   if (f.stat === "anom") return buildDynamicLUT(f, { dynamic: "div" });
   if (f.stat === "spread") return buildDynamicLUT(f, { dynamic: "seq", ramp: "plasma" });
   return cfg.dynamic ? buildDynamicLUT(f, cfg) : buildLUT(f.var);
@@ -418,9 +546,45 @@ const MERC_LAT = 85.0511287798;
 // neighbouring world copy, never reaches an uncovered edge.
 const WORLD_COPIES = [-720, -360, 0, 360, 720];
 
+// ---------------------------------------------------------------- view URL
+// The selection and map view are mirrored into the query string so a link
+// reproduces a view: ?dataset=..&var=..&exp=..&member=..&stat=..&plev=..
+// &time=YYYY-MM&unit=..&compare=1&exp_b=..&member_b=..&stat_b=..&time_b=..
+// &lat=..&lon=..&z=..&globe=1 . URL values take precedence over the
+// browser's remembered state; unknown or malformed values are ignored.
+const URL_VIEW = (() => {
+  const q = new URLSearchParams(location.search);
+  const out = {};
+  const str = (k) => (q.has(k) && q.get(k).trim() ? q.get(k).trim() : null);
+  const num = (k) => (q.has(k) && Number.isFinite(+q.get(k)) ? +q.get(k) : null);
+  for (const [qk, sk] of [["dataset", "dataset"], ["var", "var"], ["exp", "experiment"], ["member", "member"], ["stat", "stat"]]) {
+    const v = str(qk); if (v) out[sk] = v;
+  }
+  if (num("plev") != null) out.plev = num("plev");
+  if (str("time") && /^\d{4}-\d{2}$/.test(str("time"))) out.timeA = str("time");
+  if (str("time_b") && /^\d{4}-\d{2}$/.test(str("time_b"))) out.timeB = str("time_b");
+  if (q.has("compare")) out.compare = q.get("compare") === "1";
+  if (q.has("cells")) out.cells = q.get("cells") === "1";
+  if (str("exp_b") || str("member_b") || str("stat_b")) {
+    out.b = {};
+    if (str("exp_b")) out.b.experiment = str("exp_b");
+    if (str("member_b")) out.b.member = str("member_b");
+    if (str("stat_b")) out.b.stat = str("stat_b");
+  }
+  if (str("unit") && out.var) out.units = { [out.var]: str("unit") };
+  if (out.var && (str("cmap") || str("cmapd"))) {
+    out.cmap = { seq: {}, div: {} };
+    if (str("cmap")) out.cmap.seq[out.var] = str("cmap");
+    if (str("cmapd")) out.cmap.div[out.var] = str("cmapd");
+  }
+  if (num("lat") != null && num("lon") != null) out.view = { lat: num("lat"), lon: num("lon"), z: num("z") };
+  if (q.get("globe") === "1") out.globe = { open: true, lat0: num("lat"), lon0: num("lon") };
+  return out;
+})();
+
 const map = L.map("map", {
-  center: [22, 10],
-  zoom: 3,
+  center: URL_VIEW.view ? [Math.max(-85, Math.min(85, URL_VIEW.view.lat)), URL_VIEW.view.lon] : [22, 10],
+  zoom: URL_VIEW.view && URL_VIEW.view.z != null ? Math.max(2, Math.min(9, URL_VIEW.view.z)) : 3,
   minZoom: 2,
   maxZoom: 9,
   worldCopyJump: true,
@@ -429,6 +593,10 @@ const map = L.map("map", {
   closePopupOnClick: false, // Ctrl+click station placement must not close the readout
   zoomControl: true,
 });
+// Plain "Leaflet" credit in the attribution corner (no flag, no link); the
+// basemap providers' own credits (OpenStreetMap, CARTO, Esri) stay, as
+// their terms require.
+map.attributionControl.setPrefix("Leaflet");
 
 // Never allow zooming out past the point where the world map is shorter
 // than the viewport — that would expose empty void above/below the poles.
@@ -461,7 +629,7 @@ const basemapLayer = L.tileLayer(
   {
     attribution:
       '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
-      '&copy; <a href="https://carto.com/attributions">CARTO</a> · SPEAR-MED (NOAA GFDL)',
+      '&copy; <a href="https://carto.com/attributions">CARTO</a> · <span id="attr-dataset">data</span>',
     subdomains: "abcd",
     maxZoom: 20,
     crossOrigin: true,
@@ -600,11 +768,13 @@ let loadSeq = 0;            // guards against out-of-order responses
 // Selection state lives here, not in native <select> elements — their OS
 // popups don't register clicks reliably in some WSL/remote environments.
 const state = {
+  dataset: null,       // active dataset id (from /api/meta)
   var: "pr",
   experiment: "scenarioSSP5-85",
   member: "r1i1p1f1",
   stat: "raw",   // raw | mean | spread | anom
   compare: false,
+  cells: false,  // paint flat grid cells (nearest centre) instead of blending between centres
   plev: 500,
   b: { experiment: "scenarioSSP5-85", member: "r2i1p1f1", stat: "raw" },
   units: {
@@ -612,6 +782,9 @@ const state = {
     ta: "c", tos: "c", ua: "ms", va: "ms", zg: "m", hus: "kgkg",
     rlut: "wm2", rsut: "wm2", rsdt: "wm2",
   },
+  // colour-scale choices from the legend picker, per variable: for the
+  // plain field ("seq") and for compare / deviation ("div"); absent = default
+  cmap: { seq: {}, div: {} },
   // Display filter in BASE units (null = unbounded); values outside
   // [lo, hi] render transparent. Session-only, reset on variable change.
   filter: { lo: null, hi: null },
@@ -622,12 +795,66 @@ const statusEl = el("status");
 
 // ---- selection persistence across page refreshes
 const SAVED = (() => {
+  let stored = null;
   try {
-    return JSON.parse(localStorage.getItem("spearViewer") || "null");
-  } catch {
-    return null;
+    stored = JSON.parse(localStorage.getItem("spearViewer") || "null");
+  } catch { /* storage unavailable */ }
+  if (!Object.keys(URL_VIEW).length) return stored;
+  // A link describes the whole view: whatever it leaves out means the
+  // defaults (so it looks the same for everyone), not this browser's
+  // remembered selection. Only display preferences carry over.
+  const base = stored || {};
+  const merged = { opacity: base.opacity, particles: base.particles, cells: base.cells, grat: base.grat,
+                   contours: base.contours, units: { ...(base.units || {}) }, cmap: base.cmap, ...URL_VIEW };
+  if (URL_VIEW.cmap) {
+    const b = (base.cmap && typeof base.cmap.seq === "object") ? base.cmap : { seq: {}, div: {} };
+    merged.cmap = { seq: { ...b.seq, ...URL_VIEW.cmap.seq }, div: { ...b.div, ...URL_VIEW.cmap.div } };
   }
+  if (URL_VIEW.units) merged.units = { ...(base.units || {}), ...URL_VIEW.units };
+  return merged;
 })();
+
+// Write the current view into the query string (no reload, no history entry).
+let urlSyncTimer = null;
+function syncUrl() {
+  if (!meta || datasetSwitching) return;
+  const q = new URLSearchParams();
+  q.set("dataset", state.dataset);
+  q.set("var", state.var);
+  if (Object.keys(meta.experiments).length > 1) q.set("exp", state.experiment);
+  if (meta.ensemble) { q.set("member", state.member); q.set("stat", state.stat); }
+  if (meta.variables[state.var] && meta.variables[state.var].plev) q.set("plev", state.plev);
+  q.set("time", el("month-input").value);
+  const unit = state.units[state.var];
+  if (unit) q.set("unit", unit);
+  if (cmapOverride("seq")) q.set("cmap", cmapOverride("seq"));
+  if (cmapOverride("div")) q.set("cmapd", cmapOverride("div"));
+  if (state.cells) q.set("cells", "1");
+  if (state.compare) {
+    q.set("compare", "1");
+    if (Object.keys(meta.experiments).length > 1) q.set("exp_b", state.b.experiment);
+    if (meta.ensemble) { q.set("member_b", state.b.member); q.set("stat_b", state.b.stat); }
+    q.set("time_b", el("month-input-b").value);
+  }
+  const onGlobe = typeof globe !== "undefined" && globe.open;
+  if (onGlobe) {
+    q.set("globe", "1");
+    q.set("lat", globe.lat0.toFixed(2));
+    q.set("lon", globe.lon0.toFixed(2));
+  } else {
+    const c = map.getCenter();
+    q.set("lat", c.lat.toFixed(2));
+    q.set("lon", (((c.lng + 180) % 360 + 360) % 360 - 180).toFixed(2));
+    q.set("z", String(map.getZoom()));
+  }
+  const next = `${location.pathname}?${q}`;
+  if (next !== location.pathname + location.search) history.replaceState(null, "", next);
+}
+function scheduleUrlSync() {
+  clearTimeout(urlSyncTimer);
+  urlSyncTimer = setTimeout(syncUrl, 300);
+}
+map.on("moveend zoomend", scheduleUrlSync);
 
 // lat/lon graticule toggles — shared by the flat map and the globe
 const gratState = {
@@ -635,9 +862,13 @@ const gratState = {
   lon: !(SAVED && SAVED.grat && SAVED.grat.lon === false),
 };
 
+let datasetSwitching = false; // set while reloading into another dataset
+
 function saveState() {
+  if (datasetSwitching) return; // don't overwrite the switch with the old selection
   try {
     localStorage.setItem("spearViewer", JSON.stringify({
+      dataset: state.dataset,
       var: state.var,
       experiment: state.experiment,
       member: state.member,
@@ -646,10 +877,12 @@ function saveState() {
       plev: state.plev,
       b: state.b,
       units: state.units,
+      cmap: state.cmap,
       timeA: el("month-input").value,
       timeB: el("month-input-b").value,
       opacity: el("opacity").value,
       particles: el("particles-toggle").checked,
+      cells: state.cells,
       pins: (typeof pinnedPoints !== "undefined" ? pinnedPoints : []).map((p) => ({
         lat: p.latlng.lat,
         lng: p.latlng.lng,
@@ -689,6 +922,7 @@ function saveState() {
       },
     }));
   } catch { /* storage unavailable — persistence is best-effort */ }
+  scheduleUrlSync();
 }
 
 function setStatus(msg, isError) {
@@ -826,14 +1060,31 @@ function toFloat32(rows, nlat, nlon) {
   return a;
 }
 
+// Fractional grid column for a longitude. A global grid (g.wrap) joins
+// column nlon-1 to column 0, so any longitude maps inside it; a regional
+// grid (CONUS, ...) returns -1 for longitudes it does not cover.
+function gridX(g, lon) {
+  let x = (lon - g.lon0) / g.dlon;
+  if (g.wrap === false) {
+    if (x < 0) x = (lon + 360 - g.lon0) / g.dlon;
+    else if (x > g.nlon - 1) x = (lon - 360 - g.lon0) / g.dlon;
+    return x < 0 || x > g.nlon - 1 ? -1 : x;
+  }
+  return ((x % g.nlon) + g.nlon) % g.nlon;
+}
+function gridX1(g, x0) {
+  return g.wrap === false ? Math.min(x0 + 1, g.nlon - 1) : (x0 + 1) % g.nlon;
+}
+
 // Bilinear sample of a flat [nlat*nlon] Float32Array at (lat, lon);
-// wraps across the antimeridian. g holds grid geometry.
+// wraps across the antimeridian on global grids. g holds grid geometry.
 function sampleGrid(g, arr, lat, lon) {
-  const x = ((((lon - g.lon0) / g.dlon) % g.nlon) + g.nlon) % g.nlon;
+  const x = gridX(g, lon);
+  if (x < 0) return null;
   const y = (lat - g.lat0) / g.dlat;
   if (y < 0 || y > g.nlat - 1) return null;
   const x0 = x | 0, y0 = y | 0;
-  const x1 = (x0 + 1) % g.nlon, y1 = Math.min(y0 + 1, g.nlat - 1);
+  const x1 = gridX1(g, x0), y1 = Math.min(y0 + 1, g.nlat - 1);
   const tx = x - x0, ty = y - y0;
   const n = g.nlon;
   const v00 = arr[y0 * n + x0], v10 = arr[y0 * n + x1];
@@ -850,11 +1101,41 @@ function sampleGrid(g, arr, lat, lon) {
   );
 }
 
+// Nearest cell index for a longitude / latitude, or -1 outside the grid.
+// `extend` admits the half cell beyond the outermost centres (so edge
+// cells of a regional grid paint at full width); off, the domain is the
+// same as the bilinear sampler's.
+function gridXNearest(g, lon, extend = true) {
+  const e = extend ? 0.5 : 0;
+  let x = (lon - g.lon0) / g.dlon;
+  if (g.wrap === false) {
+    if (x < -e) x = (lon + 360 - g.lon0) / g.dlon;
+    else if (x > g.nlon - 1 + e) x = (lon - 360 - g.lon0) / g.dlon;
+    return x < -e || x > g.nlon - 1 + e ? -1 : Math.max(0, Math.min(g.nlon - 1, Math.round(x)));
+  }
+  return Math.round(((x % g.nlon) + g.nlon) % g.nlon) % g.nlon;
+}
+function gridYNearest(g, lat, extend = true) {
+  const e = extend ? 0.5 : 0;
+  const y = (lat - g.lat0) / g.dlat;
+  return y < -e || y > g.nlat - 1 + e ? -1 : Math.max(0, Math.min(g.nlat - 1, Math.round(y)));
+}
+// Flat-cell sample: the value of the nearest cell centre, no blending.
+function sampleGridNearest(g, arr, lat, lon, extend = true) {
+  const j = gridXNearest(g, lon, extend);
+  if (j < 0) return null;
+  const i = gridYNearest(g, lat, extend);
+  if (i < 0) return null;
+  const v = arr[i * g.nlon + j];
+  return v !== v ? null : v;
+}
+
 function nearestCell(g, lat, lon) {
   let i = Math.round((lat - g.lat0) / g.dlat);
-  let j = Math.round((lon - g.lon0) / g.dlon);
   i = Math.max(0, Math.min(g.nlat - 1, i));
-  j = ((j % g.nlon) + g.nlon) % g.nlon;
+  const x = gridX(g, lon);
+  if (x < 0) return { value: null, lat: g.lat0 + i * g.dlat, lon };
+  const j = Math.min(g.nlon - 1, Math.round(x));
   const v = g._grid[i * g.nlon + j];
   return {
     value: Number.isNaN(v) ? null : v,
@@ -878,24 +1159,59 @@ function renderFieldToURL(d, lut, filter) {
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(W, H);
   const px = img.data;
+  const yMax = Math.log(Math.tan(Math.PI / 4 + (MERC_LAT * Math.PI) / 360));
+  // row 0 = top of image = +85.05; invert Mercator to get latitude
+  const rowLat = (r) => {
+    const my = yMax - (2 * yMax * r) / (H - 1);
+    return (2 * Math.atan(Math.exp(my)) - Math.PI / 2) * (180 / Math.PI);
+  };
+
+  if (state.cells) {
+    // "Grid cells": every pixel takes the value of the nearest cell
+    // centre, so each cell paints as a flat block at the model's true
+    // resolution (edge cells of regional grids at their full width).
+    const cn = new Int32Array(W);
+    for (let c = 0; c < W; c++) cn[c] = gridXNearest(d, -180 + (360 * c) / (W - 1));
+    for (let r = 0; r < H; r++) {
+      const i = gridYNearest(d, rowLat(r));
+      if (i < 0) continue; // leave the row transparent
+      const row = i * nlon;
+      let k = r * W * 4;
+      for (let c = 0; c < W; c++, k += 4) {
+        if (cn[c] < 0) continue;
+        const v = grid[row + cn[c]];
+        if (v !== v) continue;
+        if (fLo != null && v < fLo) continue; // filtered out -> transparent
+        if (fHi != null && v > fHi) continue;
+        let idx = ((v - lut.min) * lut.scale) | 0;
+        if (idx < 0) idx = 0;
+        else if (idx > lut.last) idx = lut.last;
+        const li = idx * 4;
+        px[k] = lut.data[li];
+        px[k + 1] = lut.data[li + 1];
+        px[k + 2] = lut.data[li + 2];
+        px[k + 3] = lut.data[li + 3];
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => resolve(blob ? URL.createObjectURL(blob) : null), "image/png");
+    });
+  }
 
   // Column -> grid x mapping is independent of the row; precompute it.
   const cx0 = new Int32Array(W), cx1 = new Int32Array(W);
   const ctx_ = new Float32Array(W);
   for (let c = 0; c < W; c++) {
     const lon = -180 + (360 * c) / (W - 1);
-    const x = ((((lon - lon0) / dlon) % nlon) + nlon) % nlon;
-    cx0[c] = x | 0;
-    cx1[c] = (cx0[c] + 1) % nlon;
-    ctx_[c] = x - cx0[c];
+    const x = gridX(d, lon);
+    cx0[c] = x < 0 ? -1 : x | 0; // -1: outside a regional grid -> transparent
+    cx1[c] = x < 0 ? -1 : gridX1(d, cx0[c]);
+    ctx_[c] = x < 0 ? 0 : x - cx0[c];
   }
 
-  const yMax = Math.log(Math.tan(Math.PI / 4 + (MERC_LAT * Math.PI) / 360));
   for (let r = 0; r < H; r++) {
-    // row 0 = top of image = +85.05; invert Mercator to get latitude
-    const my = yMax - (2 * yMax * r) / (H - 1);
-    const lat = (2 * Math.atan(Math.exp(my)) - Math.PI / 2) * (180 / Math.PI);
-    const y = (lat - lat0) / dlat;
+    const y = (rowLat(r) - lat0) / dlat;
     if (y < 0 || y > nlat - 1) continue; // leave the row transparent
     const y0 = y | 0;
     const y1 = Math.min(y0 + 1, nlat - 1);
@@ -903,6 +1219,7 @@ function renderFieldToURL(d, lut, filter) {
     const row0 = y0 * nlon, row1 = y1 * nlon;
     let k = r * W * 4;
     for (let c = 0; c < W; c++, k += 4) {
+      if (cx0[c] < 0) continue;
       const tx = ctx_[c];
       const v00 = grid[row0 + cx0[c]], v10 = grid[row0 + cx1[c]];
       const v01 = grid[row1 + cx0[c]], v11 = grid[row1 + cx1[c]];
@@ -937,26 +1254,121 @@ function renderFieldToURL(d, lut, filter) {
 }
 
 function applyOverlayUrl(url) {
-  const opacity = el("opacity").value / 100;
   if (overlays.length) {
-    for (const o of overlays) {
-      o.setUrl(url);
-      o.setOpacity(opacity);
-    }
+    for (const o of overlays) o.setUrl(url);
   } else {
     overlays = WORLD_COPIES.map((offset) =>
       L.imageOverlay(url, [[-MERC_LAT, -180 + offset], [MERC_LAT, 180 + offset]], {
-        opacity,
+        opacity: el("opacity").value / 100,
         interactive: false,
       }).addTo(map)
     );
   }
+  applyOverlayOpacity();
 }
+
+// The Opacity slider drives the image overlay, or the grid-cells canvas
+// when that is showing the field instead (the image is then hidden).
+function applyOverlayOpacity() {
+  const v = el("opacity").value / 100;
+  const hide = cellsActive();
+  for (const o of overlays) o.setOpacity(hide ? 0 : v);
+  if (cellsLayer.canvas) cellsLayer.canvas.style.opacity = v;
+}
+
+// ---- "Grid cells" canvas. The image overlay is a fixed 1600-px raster
+// that the browser smooths when it upscales, so even nearest-painted cells
+// blur into each other at high zoom. In cells mode the field is instead
+// resampled per SCREEN pixel (nearest cell centre) onto a canvas pinned
+// to the viewport and redrawn after every move, zoom or repaint: cell
+// edges are exact at any zoom. The image overlay is hidden meanwhile but
+// still painted, so switching back is instant.
+const cellsLayer = { canvas: null, ctx: null };
+
+function cellsActive() {
+  return state.cells && !!currentDisplay && !!currentLUT && currentDisplay._grid != null;
+}
+
+function initCellsCanvas() {
+  map.createPane("cells").style.zIndex = 405; // above the image overlays (400), below borders (430)
+  map.getPane("cells").style.pointerEvents = "none";
+  const canvas = document.createElement("canvas");
+  canvas.className = "particle-canvas leaflet-zoom-animated"; // same pinning rules as the particle canvas
+  canvas.style.display = "none";
+  map.getPane("cells").appendChild(canvas);
+  cellsLayer.canvas = canvas;
+  cellsLayer.ctx = canvas.getContext("2d");
+  map.on("moveend zoomend resize", cellsDraw);
+  // follow the zoom animation like an image overlay does, then redraw crisp
+  map.on("zoomanim", (e) => {
+    if (canvas.style.display === "none") return;
+    const nw = map._latLngToNewLayerPoint(map.containerPointToLatLng([0, 0]), e.zoom, e.center);
+    L.DomUtil.setTransform(canvas, nw, map.getZoomScale(e.zoom));
+  });
+}
+
+function cellsDraw() {
+  const canvas = cellsLayer.canvas;
+  if (!canvas) return;
+  if (!cellsActive()) { canvas.style.display = "none"; return; }
+  canvas.style.display = "";
+  const size = map.getSize();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = Math.round(size.x * dpr), H = Math.round(size.y * dpr);
+  if (canvas.width !== W || canvas.height !== H) {
+    canvas.width = W;
+    canvas.height = H;
+    canvas.style.width = `${size.x}px`;
+    canvas.style.height = `${size.y}px`;
+  }
+  L.DomUtil.setPosition(canvas, map.containerPointToLayerPoint([0, 0])); // pin to the viewport
+  const d = currentDisplay, grid = d._grid, nlon = d.nlon;
+  const lut = effectiveLUT();
+  const fLo = state.filter ? state.filter.lo : null, fHi = state.filter ? state.filter.hi : null;
+  // one projection per pixel column and row (Mercator is separable)
+  const col = new Int32Array(W), row = new Int32Array(H);
+  for (let x = 0; x < W; x++) col[x] = gridXNearest(d, map.containerPointToLatLng([(x + 0.5) / dpr, 0]).lng);
+  for (let y = 0; y < H; y++) row[y] = gridYNearest(d, map.containerPointToLatLng([0, (y + 0.5) / dpr]).lat);
+  const img = cellsLayer.ctx.createImageData(W, H);
+  const px = img.data;
+  for (let y = 0; y < H; y++) {
+    const i = row[y];
+    if (i < 0) continue;
+    const base = i * nlon;
+    let k = y * W * 4;
+    for (let x = 0; x < W; x++, k += 4) {
+      const j = col[x];
+      if (j < 0) continue;
+      const v = grid[base + j];
+      if (v !== v) continue;
+      if (fLo != null && v < fLo) continue;
+      if (fHi != null && v > fHi) continue;
+      let idx = ((v - lut.min) * lut.scale) | 0;
+      if (idx < 0) idx = 0;
+      else if (idx > lut.last) idx = lut.last;
+      const li = idx * 4;
+      px[k] = lut.data[li];
+      px[k + 1] = lut.data[li + 1];
+      px[k + 2] = lut.data[li + 2];
+      px[k + 3] = lut.data[li + 3];
+    }
+  }
+  cellsLayer.ctx.putImageData(img, 0, 0);
+}
+
+const CELLS_INFO_TEXT =
+  "Paint every grid cell as a flat block of its own value instead of " +
+  "blending smoothly between cell centres. Shows the model's true " +
+  "resolution, which is handy for diagnostic checks. Applies to the map, " +
+  "the globe, year playback and the PNG/GIF exports; hover readouts always " +
+  "give the cell value either way. Cell edges are exact at every zoom. Remembered, and carried in shared links.";
 
 const painted = { d: null, lut: null }; // what the overlay currently shows
 function renderOverlay(d, lut, seq, filter) {
   painted.d = d;
   painted.lut = lut;
+  cellsDraw(); // the grid-cells canvas (if on) shows the new field at once
+  applyOverlayOpacity();
   renderFieldToURL(d, lut, filter).then((url) => {
     if (!url) return;
     if (seq !== loadSeq) {
@@ -997,8 +1409,10 @@ function renderLegend(spec) {
   ctx.putImageData(img, 0, 0);
   el("legend-ticks").innerHTML = spec.ticks.map((t) => `<span>${t}</span>`).join("");
   el("legend-units").textContent = `${spec.label} (${spec.units})`;
+  snapLegend = { ticks: spec.ticks.slice(), label: spec.label, units: spec.units };
   updateFilterUI();
 }
+let snapLegend = null; // what the legend shows, for the PNG export's colour bar
 
 // -------------------------------------------------------- value filter
 // state.filter holds base-unit bounds; the legend handles and the numeric
@@ -1271,7 +1685,8 @@ function selLabel(f) {
     stat === "spread" ? "ens spread" :
     stat === "anom" ? `${f.member} − mean` :
     f.member === "ensmean" ? "ens mean" : f.member;
-  return `${m} · ${f.time}` + (f.plev ? ` · ${f.plev} hPa` : "");
+  // datasets without an ensemble have no member: omit the empty segment
+  return [m, f.time].filter(Boolean).join(" · ") + (f.plev ? ` · ${f.plev} hPa` : "");
 }
 
 // idx: station index (0-based) for pin cards, -1 for the ad-hoc popup.
@@ -1526,9 +1941,9 @@ async function fetchJSON(url) {
 }
 
 function fetchField(sel) {
-  const p = { var: state.var, ...sel };
+  const p = { dataset: state.dataset, var: state.var, ...sel };
   if (meta.variables[state.var].plev) p.plev = state.plev;
-  return fetchJSON(`/api/field?${new URLSearchParams(p)}`);
+  return fetchJSON(`${API}/api/field?${new URLSearchParams(p)}`);
 }
 
 // Full-screen overlay for heavy loads (pressure-level ensemble means).
@@ -1542,8 +1957,12 @@ const heavyOverlay = { timer: null, delay: null, t0: 0, seq: 0, kind: "sfc" };
 // clocks (each adapts to observed durations on this connection).
 const HEAVY_DEFAULT_SECS = { plev: 120, sfc: 12 };
 const HEAVY_NOTES = {
-  plev: "Reading all 30 members on pressure levels (~230&nbsp;MB from the cloud store).<br>First load takes a while — this selection and its sibling levels will be instant afterwards.",
-  sfc: "Reading all 30 members (~25&nbsp;MB from the cloud store).<br>First load only — this selection will be instant afterwards.",
+  get plev() {
+    return `Reading all ${meta.n_members} members on pressure levels (hundreds of MB from the store).<br>First load takes a while — this selection and its sibling levels will be instant afterwards.`;
+  },
+  get sfc() {
+    return `Reading all ${meta.n_members} members (tens of MB from the store).<br>First load only — this selection will be instant afterwards.`;
+  },
 };
 
 // Name the statistic being computed in the overlay title.
@@ -1616,6 +2035,7 @@ async function loadField() {
   const seq = ++loadSeq;
   saveState();
   boxRefresh(); // the box card mirrors the selection it will extract
+  gifRefreshNote(); // and the GIF card's frame count
   const selA = {
     experiment: state.experiment,
     member: state.member,
@@ -1688,6 +2108,7 @@ async function loadField() {
       // pressure-level variables, uas/vas near-surface otherwise. For
       // ensemble statistics the particles show the ensemble-mean wind.
       const windParams = {
+        dataset: state.dataset,
         experiment: state.experiment,
         member: state.stat === "raw" ? state.member : "ensmean",
         time: el("month-input").value,
@@ -1695,12 +2116,14 @@ async function loadField() {
       if (meta.variables[state.var].plev) windParams.plev = state.plev;
       const [f, w] = await Promise.all([
         fetchField(selA),
-        fetchJSON(`/api/wind?${new URLSearchParams(windParams)}`),
+        hasWind() ? fetchJSON(`${API}/api/wind?${new URLSearchParams(windParams)}`) : Promise.resolve(null),
       ]);
       if (seq !== loadSeq) return;
       f._grid = toFloat32(f.values, f.nlat, f.nlon);
-      w._u = toFloat32(w.u, w.nlat, w.nlon);
-      w._v = toFloat32(w.v, w.nlat, w.nlon);
+      if (w) {
+        w._u = toFloat32(w.u, w.nlat, w.nlon);
+        w._v = toFloat32(w.v, w.nlat, w.nlon);
+      }
       currentField = f;
       currentFieldB = null;
       currentWind = w;
@@ -1736,7 +2159,7 @@ function renderMeta() {
       min: -L,
       max: L,
       ticks: [-L, -L / 2, 0, L / 2, L].map((t) => fmtTick(convDiff(t, spec))),
-      color: (v, out) => diffColor(v, L, out),
+      color: divColorFn(L),
       label: currentDisplay.label,
       units: spec.unit,
     });
@@ -1746,15 +2169,15 @@ function renderMeta() {
     );
   } else {
     const f = currentField;
-    const cfg = VAR_CONFIG[f.var];
+    const cfg = varConfigFor(f.var);
     let min, max, tickVals, colorFn;
     if (f._dyn) {
       // auto-scaled range computed from the loaded field
       ({ min, max } = f._dyn);
       tickVals = [0, 1, 2, 3, 4].map((i) => min + ((max - min) * i) / 4);
       colorFn = f._dyn.div
-        ? (v, out) => diffColor(v, f._dyn.limit, out)
-        : (v, out) => rampColor(f._dyn.ramp || cfg.ramp, (v - min) / (max - min), 0.88, out);
+        ? divColorFn(f._dyn.limit)
+        : (v, out) => rampColor(cmapOverride("seq") || f._dyn.ramp || cfg.ramp, (v - min) / (max - min), 0.88, out);
     } else {
       min = cfg.legend.min;
       max = cfg.legend.max;
@@ -1762,7 +2185,7 @@ function renderMeta() {
       tickVals = spec.sci
         ? cfg.legend.ticks.filter((_, i) => i % 2 === 0)
         : cfg.legend.ticks;
-      colorFn = (v, out) => colormap(cfg.stops, v, out);
+      colorFn = fixedColorFn(cfg.stops);
     }
     renderLegend({
       min,
@@ -1777,6 +2200,7 @@ function renderMeta() {
       ` · max ${fmtTick(convForDisplay(f, f.vmax, spec))} ${spec.unit}`
     );
   }
+  updateCmapButton();
   if (typeof updateTimeline === "function") updateTimeline();
   refreshReadout();
   contoursUpdate({ noGlobe: true }); // levels follow the legend range / units
@@ -1791,12 +2215,170 @@ function renderMeta() {
   if (typeof globe !== "undefined" && globe.open) globeRender(false);
 }
 
+// ---------------------------------------------------- colour-scale picker
+// A small button by the legend opens a list of swatches; the choice
+// recolours the current field (same value range), the globe and later
+// loads, and is remembered / mirrored into the URL (cmap, cmapd).
+function cmapKindNow() {
+  const d = currentDisplay;
+  return d && (d.isDiff || d.stat === "anom" || (currentField && currentField._dyn && currentField._dyn.div)) ? "div" : "seq";
+}
+
+// What "Default" means for the field on screen, for the picker's label.
+const RAMP_LABELS = Object.fromEntries([...CMAP_CHOICES.seq, ...CMAP_CHOICES.div]);
+function defaultCmapName(kind) {
+  if (kind === "div") return "diverging";
+  const f = currentField;
+  if (!f) return "";
+  const cfg = varConfigFor(f.var);
+  if (f.stat === "spread") return "Plasma";
+  if (cfg.stops) return f.var;  // the hand-built scale for this variable
+  return RAMP_LABELS[cfg.ramp] || cfg.ramp || "auto";
+}
+
+// The picker button is a miniature of the legend bar.
+function updateCmapButton() {
+  const src = el("legend-canvas"), c = el("cmap-swatch");
+  if (!src || !c) return;
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.drawImage(src, 0, 0, c.width, c.height);
+}
+
+function setColormap(kind, id) {
+  if (cmapChoice(kind) === id) return;
+  if (id === "default") delete state.cmap[kind][state.var];
+  else state.cmap[kind][state.var] = id;
+  for (const k of Object.keys(lutCache)) delete lutCache[k];
+  if (currentDisplay) {
+    currentLUT = currentDisplay.isDiff ? buildDiffLUT(currentDisplay.limit) : lutForField(currentField);
+    renderMeta();
+  }
+  saveState();
+}
+
+let cmapPop = null;
+function hideCmapPopover() {
+  if (cmapPop) { cmapPop.remove(); cmapPop = null; }
+}
+function swatchCanvas(rampName, kind) {
+  const c = document.createElement("canvas");
+  c.width = 64; c.height = 10;
+  const ctx = c.getContext("2d");
+  const img = ctx.createImageData(64, 10);
+  const rgba = [0, 0, 0, 0];
+  for (let x = 0; x < 64; x++) {
+    const t = x / 63;
+    if (rampName) rampColor(rampName, t, 1, rgba);
+    else if (kind === "div") { diffColor(t * 2 - 1, 1, rgba); rgba[3] = 255; }
+    else {
+      // the variable's own default scale
+      const cfg = currentField ? varConfigFor(currentField.var) : null;
+      if (cfg && cfg.stops) {
+        const lo = cfg.stops[0].v, hi = cfg.stops[cfg.stops.length - 1].v;
+        colormap(cfg.stops, lo + t * (hi - lo), rgba);
+        rgba[3] = 255;
+      } else {
+        rampColor((currentField && currentField._dyn && currentField._dyn.ramp) || (cfg && cfg.ramp) || "thermal", t, 1, rgba);
+      }
+    }
+    for (let y = 0; y < 10; y++) img.data.set(rgba, (y * 64 + x) * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+function showCmapPopover(x, y) {
+  hideCmapPopover();
+  hideInfoPopover();
+  const kind = cmapKindNow();
+  cmapPop = document.createElement("div");
+  cmapPop.className = "info-popover cmap-popover";
+  const title = document.createElement("div");
+  title.className = "cmap-title";
+  title.textContent = kind === "div" ? "Colour scale (diverging)" : "Colour scale";
+  cmapPop.appendChild(title);
+  for (const [id, label] of CMAP_CHOICES[kind]) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "cmap-row" + (cmapChoice(kind) === id ? " active" : "");
+    row.appendChild(swatchCanvas(id === "default" ? null : id, kind));
+    const name = document.createElement("span");
+    name.textContent = id === "default" ? `Default (${defaultCmapName(kind)})` : label;
+    row.appendChild(name);
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setColormap(kind, id);
+      cmapPop.querySelectorAll(".cmap-row").forEach((r) => r.classList.toggle("active", r === row));
+    });
+    cmapPop.appendChild(row);
+  }
+  cmapPop.addEventListener("click", (e) => e.stopPropagation());
+  document.body.appendChild(cmapPop);
+  const r = cmapPop.getBoundingClientRect();
+  cmapPop.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+  cmapPop.style.top = `${Math.max(8, Math.min(y - r.height / 2, window.innerHeight - r.height - 8))}px`;
+}
+el("cmap-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (cmapPop) { hideCmapPopover(); return; }
+  const r = e.currentTarget.getBoundingClientRect();
+  showCmapPopover(r.right + 10, r.top + r.height / 2);
+});
+document.addEventListener("click", hideCmapPopover);
+
 // -------------------------------------------------------- controls
+// Time strings follow the variable's frequency: "YYYY-MM" for monthly
+// data, "YYYY-MM-DD" for daily. The two time pickers switch between a
+// month and a date input accordingly; range pickers (time series, box)
+// stay monthly and see month-truncated bounds.
+function timeFreq() {
+  const v = meta && meta.variables[state.var];
+  return (v && v.frequency) || "month";
+}
+function toMonthStr(t) { return (t || "").slice(0, 7); }
+function toDayStr(t, end) {
+  if (!t) return "";
+  if (t.length >= 10) return t.slice(0, 10);
+  if (!end) return `${t}-01`;
+  const [y, m] = t.split("-").map(Number);
+  return `${t}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, "0")}`;
+}
+// `t` in the form the input expects (date inputs reject "YYYY-MM").
+function fitTime(t, input, end) { return input.type === "date" ? toDayStr(t, end) : toMonthStr(t); }
+
+function syncTimeInputs() {
+  const freq = timeFreq();
+  const daily = freq === "day";
+  for (const [id, exp] of [["month-input", state.experiment], ["month-input-b", state.b.experiment]]) {
+    const input = el(id);
+    const type = daily ? "date" : "month";
+    if (input.type !== type) {
+      const old = input.value;
+      input.type = type;
+      input.value = fitTime(old, input);
+    }
+    applyExperimentRange(id, exp);
+  }
+  document.querySelectorAll(".time-word").forEach((w) => (w.textContent = daily ? "Day" : "Month"));
+  // "Play year" and its 12-month strip only make sense for monthly data
+  const monthly = freq === "month";
+  if (!monthly && playback.frames) pausePlayback();
+  el("play-btn").hidden = !monthly;
+  if (!monthly) el("continue-btn").hidden = true;
+  el("play-timeline").hidden = !monthly;
+}
+
 function stepMonth(inputId, delta) {
   const input = el(inputId);
-  const [y, m] = input.value.split("-").map(Number);
-  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
-  const next = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  const [y, m, d0] = input.value.split("-").map(Number);
+  let next;
+  if (input.type === "date") {
+    const d = new Date(Date.UTC(y, m - 1, (d0 || 1) + delta));
+    next = d.toISOString().slice(0, 10);
+  } else {
+    const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+    next = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
   if (next < input.min || next > input.max) return;
   input.value = next;
   loadField();
@@ -1805,9 +2387,9 @@ function stepMonth(inputId, delta) {
 function applyExperimentRange(inputId, experiment) {
   const exp = meta.experiments[experiment];
   const input = el(inputId);
-  input.min = exp.start;
-  input.max = exp.end;
-  if (input.value < exp.start || input.value > exp.end) input.value = exp.start;
+  input.min = fitTime(exp.start, input, false);
+  input.max = fitTime(exp.end, input, true);
+  if (input.value < input.min || input.value > input.max) input.value = input.min;
 }
 
 function buildSeg(containerId, entries, current, onPick, infos) {
@@ -1876,18 +2458,19 @@ document.addEventListener("click", () =>
 function rebuildUnitSeg() {
   buildSeg(
     "unit-seg",
-    UNITS[state.var].map((u) => [u.id, u.label]),
+    unitOptionsFor(state.var).map((u) => [u.id, u.label]),
     state.units[state.var],
-    (id) => { state.units[state.var] = id; renderMeta(); }
+    (id) => { state.units[state.var] = id; renderMeta(); saveState(); }
   );
 }
 
 function memberBtnState(btn, stat, member) {
   // Member is meaningful for Member & Deviation; greyed for Mean & Spread.
   btn.disabled = stat === "mean" || stat === "spread";
+  const n = meta ? meta.n_members : "";
   btn.textContent =
-    stat === "mean" ? "ensemble mean (30)" :
-    stat === "spread" ? "ensemble spread (30)" : member;
+    stat === "mean" ? `ensemble mean (${n})` :
+    stat === "spread" ? `ensemble spread (${n})` : member;
 }
 
 // When the panel overflows (e.g. compare mode), widen it by the MEASURED
@@ -1895,13 +2478,59 @@ function memberBtnState(btn, stat, member) {
 // reflows. Overlay scrollbars (some platforms) measure 0 — no change.
 function updatePanelScrollPad() {
   const p = el("panel");
-  p.style.width = ""; // reset to the base 280px before measuring
+  p.style.width = ""; // reset to the base --panel-w before measuring
   if (p.scrollHeight > p.clientHeight + 1) {
     const sw = p.offsetWidth - p.clientWidth - 2; // 2 = left+right borders
-    if (sw > 0) p.style.width = `${280 + sw}px`;
+    if (sw > 0) p.style.width = `${panelWidth + sw}px`;
   }
 }
 window.addEventListener("resize", updatePanelScrollPad);
+
+// Resizable panel: drag the strip down its right edge (double-click
+// resets). The width lives in the --panel-w CSS variable, which the
+// Globe / Draw-a-Box buttons and the lat/lon box also offset from, and is
+// remembered per browser.
+const PANEL_W = { min: 240, max: 640, def: 280 };
+let panelWidth = PANEL_W.def;
+try {
+  const v = +localStorage.getItem("panelWidth");
+  if (v >= PANEL_W.min && v <= PANEL_W.max) panelWidth = v;
+} catch { /* storage unavailable: keep the default */ }
+
+function applyPanelWidth(w, remember) {
+  panelWidth = Math.round(Math.min(PANEL_W.max, Math.max(PANEL_W.min, w)));
+  document.documentElement.style.setProperty("--panel-w", `${panelWidth}px`);
+  updatePanelScrollPad();
+  if (remember) { try { localStorage.setItem("panelWidth", String(panelWidth)); } catch { /* ignore */ } }
+}
+
+(() => {
+  const grip = el("panel-resizer");
+  // pointer coordinates are viewport px; the panel is laid out in
+  // --ui-scale-zoomed px, so divide the drag distance by the zoom
+  const uiScale = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ui-scale")) || 1;
+  grip.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    grip.setPointerCapture(e.pointerId);
+    const startX = e.clientX, startW = panelWidth, k = uiScale();
+    document.body.classList.add("panel-resizing");
+    const move = (ev) => applyPanelWidth(startW + (ev.clientX - startX) / k, false);
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+      document.body.classList.remove("panel-resizing");
+      applyPanelWidth(panelWidth, true);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
+  });
+  grip.addEventListener("dblclick", () => applyPanelWidth(PANEL_W.def, true));
+  applyPanelWidth(panelWidth, false);
+})();
 
 function updateControlStates() {
   memberBtnState(el("member-btn"), state.stat, state.member);
@@ -1918,7 +2547,61 @@ function updateControlStates() {
   el("plev-btn").disabled = !(meta && meta.variables[state.var] && meta.variables[state.var].plev);
 }
 
-const EXP_SHORT = { historical: "Historical", "scenarioSSP5-85": "SSP5-8.5" };
+let META_ALL = null; // the full /api/meta response (all datasets); `meta` is the active one
+
+function expShort(k) {
+  const e = meta && meta.experiments[k];
+  return (e && e.short) || k;
+}
+
+function hasWind() {
+  if (!meta || !meta.wind) return false;
+  const v = meta.variables[state.var];
+  return !!(v && v.plev ? meta.wind.plev : meta.wind.sfc);
+}
+
+// Human label for a variable group (Zarr group / FMS realm) as reported by the source.
+function groupLabel(g) {
+  const known = {
+    Amon: "Atmospheric (Monthly)", Omon: "Ocean (Monthly)", Lmon: "Land (Monthly)", SImon: "Sea ice (Monthly)",
+    atmos: "Atmosphere", ocean: "Ocean", land: "Land", ice: "Sea ice",
+  };
+  return known[g] || g || "Variables";
+}
+
+function applyBranding() {
+  const link = el("brand-link");
+  link.textContent = meta.title;
+  link.href = meta.home || meta.link || "#";
+  link.title = meta.home ? `Open the ${meta.title} homepage` : meta.title;
+  el("brand-sub").textContent = meta.subtitle || "";
+  document.title = `${meta.title} Viewer`;
+  const attr = el("attr-dataset");
+  if (attr) attr.textContent = meta.title;
+  const da = el("data-access");
+  if (meta.link) { da.href = meta.link; da.hidden = false; } else { da.hidden = true; }
+}
+
+// Dataset switch: persist the choice and reload — init() then builds
+// every control from that dataset's metadata.
+function buildDatasetSeg() {
+  const ok = META_ALL.datasets.filter((d) => !d.error);
+  el("dataset-row").hidden = ok.length < 2;
+  if (ok.length < 2) return;
+  buildSeg("dataset-seg", ok.map((d) => [d.id, d.title]), meta.id, (id) => {
+    if (id === meta.id) return;
+    datasetSwitching = true;
+    try {
+      // keep only view preferences; the selection is rebuilt from the new dataset
+      const saved = JSON.parse(localStorage.getItem("spearViewer") || "{}");
+      const keep = { dataset: id, opacity: saved.opacity, particles: saved.particles,
+                     grat: saved.grat, contours: saved.contours, globe: saved.globe, units: saved.units,
+                     cmap: saved.cmap };
+      localStorage.setItem("spearViewer", JSON.stringify(keep));
+    } catch { /* best effort */ }
+    location.assign(`${location.pathname}?dataset=${encodeURIComponent(id)}`);
+  }, Object.fromEntries(ok.map((d) => [d.id, d.description || d.subtitle || d.title])));
+}
 
 // ---- floating info popover for the (i) marks
 let infoPopover = null;
@@ -1947,46 +2630,140 @@ function showInfoPopover(text, x, y) {
 }
 document.addEventListener("click", hideInfoPopover);
 
-// Variable buttons live in three groups (surface/TOA, pressure levels,
-// ocean); selecting in one group clears the active state in all.
+// Variable picker: a single dropdown whose items are grouped by the
+// variable's group (Zarr group / FMS realm); level-bearing variables of a
+// group sit under a "Pressure levels" sub-header.  A filter box at the top
+// keeps long lists (the production dataset has many variables) searchable.
 function buildVarButtons() {
-  const containers = {
-    sfc: el("var-seg-sfc"),
-    plev: el("var-seg-plev"),
-    ocean: el("var-seg-ocean"),
-  };
-  Object.values(containers).forEach((c) => (c.innerHTML = ""));
+  const btn = el("var-btn");
+  const list = el("var-list");
+  const holder = el("plev-holder");
+  holder.hidden = !Object.values(meta.variables).some((v) => v.plev);
+
+  // Order: groups in order of first appearance, surface variables first,
+  // then the group's pressure-level variables.
+  const groups = [];
+  const byGroup = {};
   for (const [k, v] of Object.entries(meta.variables)) {
-    const target = v.group === "Omon" ? containers.ocean : v.plev ? containers.plev : containers.sfc;
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.dataset.value = k;
-    btn.title = v.long;
-    // Label with the store's actual variable name; ⓘ carries the full name.
-    btn.textContent = k;
-    const i = document.createElement("span");
-    i.className = "info-i";
-    i.textContent = "ⓘ";
-    i.addEventListener("click", (e) => {
-      e.stopPropagation();
-      showInfoPopover(v.long, e.clientX, e.clientY);
-    });
-    btn.appendChild(i);
-    if (k === state.var) btn.classList.add("active");
-    btn.addEventListener("click", () => {
-      if (state.var === k) return;
-      document
-        .querySelectorAll("#var-seg-sfc button, #var-seg-plev button, #var-seg-ocean button")
-        .forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.var = k;
-      state.filter = { lo: null, hi: null }; // filter bounds are per-variable
-      rebuildUnitSeg();
-      updateControlStates();
-      loadField();
-    });
-    target.appendChild(btn);
+    const g = v.group || "";
+    if (!byGroup[g]) { byGroup[g] = { sfc: [], plev: [] }; groups.push(g); }
+    byGroup[g][v.plev ? "plev" : "sfc"].push(k);
   }
+
+  const setLabel = () => {
+    const v = meta.variables[state.var];
+    btn.textContent = state.var;
+    btn.title = v ? v.long : "";
+    el("var-long").textContent = v ? v.long : "";
+  };
+
+  const select = (k) => {
+    list.hidden = true;
+    if (state.var === k) return;
+    const v = meta.variables[k];
+    state.var = k;
+    state.filter = { lo: null, hi: null }; // filter bounds are per-variable
+    syncTimeInputs(); // the new variable may be daily where the old was monthly
+    // variables of one dataset can cover different periods
+    const mi = el("month-input");
+    if (v.start && v.end) {
+      const lo = fitTime(v.start, mi, false), hi = fitTime(v.end, mi, true);
+      if (mi.value < lo || mi.value > hi) mi.value = lo;
+    }
+    setLabel();
+    list.querySelectorAll(".dd-item").forEach((i) =>
+      i.classList.toggle("selected", i.dataset.value === k)
+    );
+    rebuildUnitSeg();
+    updateControlStates();
+    loadField();
+  };
+
+  list.innerHTML = "";
+  const nVars = Object.keys(meta.variables).length;
+  let filter = null;
+  if (nVars > 8) {
+    const wrap = document.createElement("div");
+    wrap.className = "dd-filter";
+    filter = document.createElement("input");
+    filter.type = "search";
+    filter.placeholder = "Filter variables…";
+    filter.setAttribute("aria-label", "Filter variables");
+    filter.addEventListener("click", (e) => e.stopPropagation());
+    filter.addEventListener("input", () => applyFilter(filter.value));
+    filter.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { list.hidden = true; }
+      if (e.key === "Enter") {
+        const first = list.querySelector(".dd-item:not([hidden])");
+        if (first) select(first.dataset.value);
+      }
+    });
+    wrap.appendChild(filter);
+    list.appendChild(wrap);
+  }
+
+  const addItem = (k) => {
+    const v = meta.variables[k];
+    const item = document.createElement("div");
+    item.className = "dd-item var-item" + (k === state.var ? " selected" : "");
+    item.dataset.value = k;
+    item.dataset.search = `${k} ${v.long || ""}`.toLowerCase();
+    const name = document.createElement("span");
+    name.className = "var-name";
+    name.textContent = k;
+    const long = document.createElement("span");
+    long.className = "var-desc";
+    long.textContent = v.long || "";
+    item.appendChild(name);
+    item.appendChild(long);
+    item.addEventListener("click", (e) => { e.stopPropagation(); select(k); });
+    list.appendChild(item);
+  };
+  const addHeader = (text, sub) => {
+    const h = document.createElement("div");
+    h.className = "dd-header" + (sub ? " sub" : "");
+    h.textContent = text;
+    list.appendChild(h);
+  };
+  for (const g of groups) {
+    addHeader(groupLabel(g));
+    byGroup[g].sfc.forEach(addItem);
+    if (byGroup[g].plev.length) {
+      addHeader("Pressure levels", true);
+      byGroup[g].plev.forEach(addItem);
+    }
+  }
+
+  // Hide non-matching items; a header disappears when nothing under it matches.
+  const applyFilter = (q) => {
+    q = (q || "").trim().toLowerCase();
+    let lastHeaders = [];
+    for (const node of list.children) {
+      if (node.classList.contains("dd-header")) {
+        if (!node.classList.contains("sub")) lastHeaders = [];
+        node.hidden = true;
+        lastHeaders.push(node);
+      } else if (node.classList.contains("dd-item")) {
+        const show = !q || node.dataset.search.includes(q);
+        node.hidden = !show;
+        if (show) { lastHeaders.forEach((h) => (h.hidden = false)); lastHeaders = []; }
+      }
+    }
+  };
+
+  setLabel();
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".dd-list").forEach((l) => {
+      if (l !== list) l.hidden = true;
+    });
+    list.hidden = !list.hidden;
+    if (!list.hidden) {
+      if (filter) { filter.value = ""; applyFilter(""); filter.focus(); }
+      const cur = list.querySelector(".dd-item.selected");
+      if (cur) cur.scrollIntoView({ block: "nearest" });
+    }
+  };
 }
 
 function buildPlevDropdown() {
@@ -2020,11 +2797,33 @@ function buildPlevDropdown() {
 }
 
 async function init() {
-  meta = await fetchJSON("/api/meta");
+  META_ALL = await fetchJSON(`${API}/api/meta`);
+  const wanted = (SAVED && SAVED.dataset) || META_ALL.default;
+  const dsMeta =
+    META_ALL.datasets.find((d) => d.id === wanted && !d.error) ||
+    META_ALL.datasets.find((d) => d.id === META_ALL.default);
+  meta = { ...dsMeta, ts_limits: META_ALL.ts_limits, box_limits: META_ALL.box_limits };
+  state.dataset = meta.id;
+  applyBranding();
+  buildDatasetSeg();
+
+  // dataset defaults (before the saved selection is restored on top)
+  state.var = meta.variables.pr ? "pr" : Object.keys(meta.variables)[0];
+  state.experiment = meta.experiments["scenarioSSP5-85"] ? "scenarioSSP5-85" : Object.keys(meta.experiments)[0];
+  state.b.experiment = state.experiment;
+  state.member = meta.members[0] || "";
+  state.b.member = meta.members[1] || meta.members[0] || "";
+  state.plev = meta.levels.includes(500) ? 500 : (meta.levels[0] || 500);
+  // rows that make no sense for this dataset
+  el("exp-row").hidden = el("exp-row-b").hidden = Object.keys(meta.experiments).length < 2;
+  el("member-row").hidden = el("member-row-b").hidden = !meta.ensemble;
+  el("stat-row").hidden = el("stat-row-b").hidden = !meta.ensemble;
+  el("wind-row").hidden = !(meta.wind && (meta.wind.sfc || meta.wind.plev));
 
   // Restore the previous session's selections (validated against meta).
   const STAT_IDS = ["raw", "mean", "spread", "anom"];
-  if (SAVED) {
+  const sameDataset = SAVED && ((SAVED.dataset || META_ALL.default) === meta.id);
+  if (sameDataset) {
     if (meta.variables[SAVED.var]) state.var = SAVED.var;
     if (meta.experiments[SAVED.experiment]) state.experiment = SAVED.experiment;
     if (meta.members.includes(SAVED.member)) state.member = SAVED.member;
@@ -2040,6 +2839,15 @@ async function init() {
     }
     if (SAVED.units) Object.assign(state.units, SAVED.units);
   }
+  if (SAVED && SAVED.cmap) {
+    for (const k of ["seq", "div"]) {
+      const per = SAVED.cmap[k];
+      if (!per || typeof per !== "object") continue; // (older saves held a single id)
+      for (const [v, id] of Object.entries(per)) {
+        if (RAMPS[id] && CMAP_CHOICES[k].some(([c]) => c === id)) state.cmap[k][v] = id;
+      }
+    }
+  }
 
   const expInfos = Object.fromEntries(
     Object.entries(meta.experiments).map(([k, v]) => [k, v.long])
@@ -2050,12 +2858,12 @@ async function init() {
   buildPlevDropdown();
   buildSeg(
     "exp-seg",
-    Object.keys(meta.experiments).map((k) => [k, EXP_SHORT[k] || k]),
+    Object.keys(meta.experiments).map((k) => [k, expShort(k)]),
     state.experiment,
     (v) => {
       state.experiment = v;
-      // Selecting a scenario jumps to its first available month.
-      el("month-input").value = meta.experiments[v].start;
+      // Selecting a scenario jumps to its first available time step.
+      el("month-input").value = fitTime(meta.experiments[v].start, el("month-input"));
       applyExperimentRange("month-input", v);
       tsRange.start = "";
       tsSetRangeDefaults();
@@ -2065,11 +2873,11 @@ async function init() {
   );
   buildSeg(
     "exp-seg-b",
-    Object.keys(meta.experiments).map((k) => [k, EXP_SHORT[k] || k]),
+    Object.keys(meta.experiments).map((k) => [k, expShort(k)]),
     state.b.experiment,
     (v) => {
       state.b.experiment = v;
-      el("month-input-b").value = meta.experiments[v].start;
+      el("month-input-b").value = fitTime(meta.experiments[v].start, el("month-input-b"));
       applyExperimentRange("month-input-b", v);
       loadField();
     },
@@ -2080,14 +2888,25 @@ async function init() {
   buildMemberDropdown("member-btn-b", "member-list-b", meta.members,
     () => state.b.member, (m) => (state.b.member = m));
 
-  el("month-input").value =
-    (SAVED && SAVED.timeA) || meta.experiments[state.experiment].start;
-  el("month-input-b").value =
-    (SAVED && SAVED.timeB) || meta.experiments[state.b.experiment].start;
+  syncTimeInputs(); // picker types follow the variable's frequency
+  el("month-input").value = fitTime(
+    (sameDataset && SAVED.timeA) || meta.experiments[state.experiment].start, el("month-input"));
+  el("month-input-b").value = fitTime(
+    (sameDataset && SAVED.timeB) || meta.experiments[state.b.experiment].start, el("month-input-b"));
+  // a remembered month outside the experiment (or the variable's own period) jumps to the start
+  for (const [id, exp] of [["month-input", state.experiment], ["month-input-b", state.b.experiment]]) {
+    const e = meta.experiments[exp];
+    const v = meta.variables[state.var];
+    const lo = (v.start && v.start > e.start) ? v.start : e.start;
+    const hi = (v.end && v.end < e.end) ? v.end : e.end;
+    if (el(id).value < lo || el(id).value > hi) el(id).value = lo;
+  }
   applyExperimentRange("month-input", state.experiment);
   applyExperimentRange("month-input-b", state.b.experiment);
   if (SAVED && SAVED.opacity != null) el("opacity").value = SAVED.opacity;
   if (SAVED && SAVED.particles != null) el("particles-toggle").checked = SAVED.particles;
+  if (SAVED && SAVED.cells != null) state.cells = !!SAVED.cells;
+  el("cells-toggle").checked = state.cells;
   el("compare-toggle").checked = state.compare;
   if (SAVED && SAVED.contours) contoursRestore(SAVED.contours);
   contoursInitUI();
@@ -2099,11 +2918,12 @@ async function init() {
   }
 
   const STAT_OPTS = [["raw", "Member"], ["mean", "Mean"], ["spread", "Spread"], ["anom", "Deviation"]];
+  const N = meta.n_members;
   const STAT_INFO = {
     raw: "Single ensemble member — one physically consistent realization of the climate (choose which member below).",
-    mean: "Ensemble mean — the average of all 30 members; averages out internal variability to isolate the forced signal.",
-    spread: "Ensemble spread — the standard deviation across the 30 members (sample std, N−1); maps where internal variability is largest.",
-    anom: "Ensemble deviation — the selected member minus the 30-member ensemble mean; shows how far that member departs from the forced signal due to internal variability.",
+    mean: `Ensemble mean — the average of all ${N} members; averages out internal variability to isolate the forced signal.`,
+    spread: `Ensemble spread — the standard deviation across the ${N} members (sample std, N−1); maps where internal variability is largest.`,
+    anom: `Ensemble deviation — the selected member minus the ${N}-member ensemble mean; shows how far that member departs from the forced signal due to internal variability.`,
   };
   buildSeg("stat-seg", STAT_OPTS, state.stat, (v) => {
     state.stat = v;
@@ -2126,11 +2946,12 @@ async function init() {
       "Available months:\n" +
       Object.entries(meta.experiments)
         .map(([k, v]) =>
-          `${k === cur ? "▶ " : "   "}${EXP_SHORT[k] || k}: ${v.start} to ${v.end}`)
+          `${k === cur ? "▶ " : "   "}${expShort(k)}: ${v.start} to ${v.end}`)
         .join("\n")
     );
   };
-  for (const [id, side] of [["month-info-a", "a"], ["month-info-b", "b"]]) {
+  // the same mark in the box card: its range follows selection A's scenario
+  for (const [id, side] of [["month-info-a", "a"], ["month-info-b", "b"], ["box-month-info", "a"]]) {
     el(id).addEventListener("click", (e) => {
       e.stopPropagation();
       showInfoPopover(monthInfoText(side), e.clientX, e.clientY);
@@ -2151,12 +2972,26 @@ async function init() {
     loadField();
   });
   el("opacity").addEventListener("input", () => {
-    for (const o of overlays) o.setOpacity(el("opacity").value / 100);
+    applyOverlayOpacity();
     saveState();
   });
+  el("cells-toggle").addEventListener("change", (e) => {
+    state.cells = e.target.checked;
+    saveState();
+    if (playback.frames || playback.playing) discardPlayback(); // its frames were painted the old way
+    painted.d = null; // force the overlay repaint
+    renderMeta();     // map overlay, and the globe if open
+  });
+  el("cells-info").addEventListener("click", (e) => {
+    e.preventDefault(); // inside the toggle's <label>: don't flip the checkbox
+    e.stopPropagation();
+    showInfoPopover(CELLS_INFO_TEXT, e.clientX, e.clientY);
+  });
+  el("cells-info").title = CELLS_INFO_TEXT;
   const download = (format) => {
     const params = new URLSearchParams({
       format,
+      dataset: state.dataset,
       var: state.var,
       experiment: state.experiment,
       member: state.member,
@@ -2172,7 +3007,7 @@ async function init() {
       params.set("time_b", el("month-input-b").value);
     }
     const a = document.createElement("a");
-    a.href = `/api/download?${params}`;
+    a.href = `${API}/api/download?${params}`;
     a.download = "";
     document.body.appendChild(a);
     a.click();
@@ -2202,6 +3037,7 @@ async function init() {
   }
   initFilterControls();
   initParticleCanvas();
+  initCellsCanvas();
   loadBorders();
   addGeoLabels();
   addCountryLabels();
@@ -2248,8 +3084,13 @@ function targetInfoByIdx(idx) {
 // re-created every time the popup content re-renders.
 const tsRange = { start: "", end: "" };
 
+// Range pickers work in months; a daily dataset's bounds are day-stamped.
+function expMonths(exp) {
+  return { ...exp, start: toMonthStr(exp.start), end: toMonthStr(exp.end) };
+}
+
 function tsSetRangeDefaults() {
-  const exp = meta.experiments[state.experiment];
+  const exp = expMonths(meta.experiments[state.experiment]);
   if (!tsRange.start || tsRange.start < exp.start || tsRange.start > exp.end) {
     tsRange.start = exp.start;
     const [y] = exp.start.split("-").map(Number);
@@ -2278,7 +3119,7 @@ function tsRangeChanged(input, which) {
     refreshReadout();
     return;
   }
-  const exp = meta.experiments[state.experiment];
+  const exp = expMonths(meta.experiments[state.experiment]);
   if (v < exp.start) v = exp.start;
   if (v > exp.end) v = exp.end;
   tsRange[which] = v;
@@ -2332,7 +3173,7 @@ function tsSectionHTML(idx) {
     `<button type="button" class="popup-ts-btn" onclick="tsExtractFor(${idx})">` +
     `Extract plot &mdash; ${who}</button>` +
     (t.ready && t.job
-      ? `<img class="popup-ts-thumb" src="/api/timeseries/plot/${t.job}.png" ` +
+      ? `<img class="popup-ts-thumb" src="${API}/api/timeseries/plot/${t.job}.png" ` +
         `onclick="tsSpawnCard('${t.job}')" title="Click to enlarge" alt="time series preview" />`
       : "") +
     (t.pin
@@ -2360,7 +3201,7 @@ function tsSpawnCard(job) {
   div.innerHTML =
     `<div class="ts-float-head"><span>Station time series</span>` +
     `<button type="button" class="ts-float-close" title="Close">&#10005;</button></div>` +
-    `<img src="/api/timeseries/plot/${job}.png" alt="time series plot" />` +
+    `<img src="${API}/api/timeseries/plot/${job}.png" alt="time series plot" />` +
     `<div class="ts-card-actions">` +
     `<button type="button" data-fmt="png">&#8595; PNG</button>` +
     `<button type="button" data-fmt="csv">&#8595; CSV</button>` +
@@ -2377,13 +3218,13 @@ function tsSpawnCard(job) {
       const fmt = btn.dataset.fmt;
       if (fmt === "png") {
         const a = document.createElement("a");
-        a.href = `/api/timeseries/plot/${job}.png`;
+        a.href = `${API}/api/timeseries/plot/${job}.png`;
         a.download = `spear_timeseries_${job}.png`;
         document.body.appendChild(a);
         a.click();
         a.remove();
       } else {
-        window.open(`/api/timeseries/data/${job}?format=${fmt}`, "_blank");
+        window.open(`${API}/api/timeseries/data/${job}?format=${fmt}`, "_blank");
       }
     });
   });
@@ -2420,7 +3261,7 @@ async function restoreTsJobs(saved) {
   const valid = {};
   await Promise.all([...ids].map(async (j) => {
     try {
-      const s = await fetchJSON(`/api/timeseries/status/${j}`);
+      const s = await fetchJSON(`${API}/api/timeseries/status/${j}`);
       if (s.done && !s.error) valid[j] = true;
     } catch { /* job gone (server restart/eviction) — drop it */ }
   }));
@@ -2536,6 +3377,7 @@ const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 function buildIdleTimeline() {
   const bar = el("play-timeline");
   bar.innerHTML = "";
+  if (timeFreq() !== "month") { bar.hidden = true; return; }
   const current = el("month-input").value;
   for (const s of playbackMonths()) {
     const [y, m] = s.split("-").map(Number);
@@ -2588,6 +3430,7 @@ function stepPlayback() {
   currentField = fr.field;
   currentDisplay = fr.field;
   if (fr.wind) currentWind = fr.wind;
+  cellsDraw(); // grid-cells canvas, if on
   el("month-input").value = fr.field.time;
   [...el("play-timeline").children].forEach((c, i) =>
     c.classList.toggle("active", i === playback.idx)
@@ -2599,6 +3442,39 @@ function stepPlayback() {
     `(${playback.idx + 1}/${playback.frames.length})`
   );
   refreshReadout();
+}
+
+// One colour scale for a set of frames (year playback, GIF export) so the
+// legend and colours don't flicker as auto-scaled fields rescale per time
+// step: dynamic ranges span the 2nd–98th percentiles of every frame; fixed
+// variable scales are used as-is. Sets f._dyn on each field for renderMeta.
+function commonLUTFor(fields) {
+  const cfg = varConfigFor(state.var);
+  const statDyn = fields[0].stat === "anom" ? "div" : fields[0].stat === "spread" ? "seq" : null;
+  const dynMode = statDyn || cfg.dynamic || null;
+  if (dynMode === "div") {
+    let L = 0;
+    for (const f of fields) {
+      const [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
+      L = Math.max(L, Math.abs(lo), Math.abs(hi));
+    }
+    L = niceLimit(L);
+    for (const f of fields) f._dyn = { min: -L, max: L, limit: L, div: true };
+    return makeLUT(-L, L, (v, out) => diffColor(v, L, out));
+  }
+  if (dynMode === "seq") {
+    let lo = Infinity, hi = -Infinity;
+    for (const f of fields) {
+      const [a, b] = samplePercentiles(f._grid, 0.02, 0.98);
+      lo = Math.min(lo, a);
+      hi = Math.max(hi, b);
+    }
+    if (!(hi > lo)) hi = lo + 1;
+    const ramp = cmapOverride("seq") || (fields[0].stat === "spread" ? "plasma" : cfg.ramp);
+    for (const f of fields) f._dyn = { min: lo, max: hi, ramp };
+    return makeLUT(lo, hi, (v, out) => rampColor(ramp, (v - lo) / (hi - lo), 0.88, out));
+  }
+  return buildLUT(state.var);
 }
 
 async function startPlayback(resume) {
@@ -2627,7 +3503,7 @@ async function startPlayback(resume) {
   el("load-pct").textContent = "0%";
   el("load-note").innerHTML =
     `Fetching ${months.length} monthly frames` +
-    (state.stat !== "raw" ? " (ensemble statistics read all 30 members per month)" : "") +
+    (state.stat !== "raw" ? ` (ensemble statistics read all ${meta.n_members} members per month)` : "") +
     (isPlev ? " on the selected pressure level" : "") +
     ".<br>Cached months are instant; progress is real.";
   el("load-cancel").hidden = false;
@@ -2649,12 +3525,13 @@ async function startPlayback(resume) {
       if (withWind) {
         if (playback.abort) throw new Error("cancelled");
         const wp = {
+          dataset: state.dataset,
           experiment: state.experiment,
           member: state.stat === "raw" ? state.member : "ensmean",
           time: mth,
         };
         if (isPlev) wp.plev = state.plev;
-        const w = await fetchJSON(`/api/wind?${new URLSearchParams(wp)}`);
+        const w = await fetchJSON(`${API}/api/wind?${new URLSearchParams(wp)}`);
         w._u = toFloat32(w.u, w.nlat, w.nlon);
         w._v = toFloat32(w.v, w.nlat, w.nlon);
         w.u = w.v = null;
@@ -2662,35 +3539,7 @@ async function startPlayback(resume) {
         bump();
       }
     }
-    // One shared color scale for the whole year so the legend/colors don't
-    // flicker as auto-scaled fields rescale per month.
-    const cfg = VAR_CONFIG[state.var];
-    let lut;
-    const statDyn = fields[0].stat === "anom" ? "div" : fields[0].stat === "spread" ? "seq" : null;
-    const dynMode = statDyn || cfg.dynamic || null;
-    if (dynMode === "div") {
-      let L = 0;
-      for (const f of fields) {
-        const [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
-        L = Math.max(L, Math.abs(lo), Math.abs(hi));
-      }
-      L = niceLimit(L);
-      lut = makeLUT(-L, L, (v, out) => diffColor(v, L, out));
-      for (const f of fields) f._dyn = { min: -L, max: L, limit: L, div: true };
-    } else if (dynMode === "seq") {
-      let lo = Infinity, hi = -Infinity;
-      for (const f of fields) {
-        const [a, b2] = samplePercentiles(f._grid, 0.02, 0.98);
-        lo = Math.min(lo, a);
-        hi = Math.max(hi, b2);
-      }
-      if (!(hi > lo)) hi = lo + 1;
-      const ramp = fields[0].stat === "spread" ? "plasma" : cfg.ramp;
-      lut = makeLUT(lo, hi, (v, out) => rampColor(ramp, (v - lo) / (hi - lo), 0.88, out));
-      for (const f of fields) f._dyn = { min: lo, max: hi, ramp };
-    } else {
-      lut = buildLUT(state.var);
-    }
+    const lut = commonLUTFor(fields); // one scale for the whole year
     currentLUT = lut; // globe + re-renders use the common year scale
     el("load-title").textContent = "Rendering frames…";
     playback.frames = [];
@@ -2756,6 +3605,7 @@ async function globeLoadGeo() {
 
 function globeRender(fast) {
   if (!globe.open || !currentDisplay || !currentLUT) return;
+  const nearest = state.cells; // flat grid cells instead of bilinear blending
   const canvas = el("globe-canvas");
   // fast may be a number (explicit render scale) or a boolean (drag preview)
   const scale = typeof fast === "number" ? fast
@@ -2806,6 +3656,7 @@ function globeRender(fast) {
   const pX = pc && pc.xOff, pRow = pc && pc.row, pTy = pc && pc.ty, pShade = pc && pc.shade;
   const lon0 = globe.lon0;
   const nlon = d.nlon, total = d.nlat * d.nlon;
+  const wrap = d.wrap !== false, period = 360 / d.dlon;
   const shift = (lon0 - d.lon0) / d.dlon; // grid x of the view-centre meridian
   const ld = lut.data, lmin = lut.min, lscale = lut.scale, llast = lut.last;
   for (let iy = y0; iy < y1; iy++) {
@@ -2820,16 +3671,25 @@ function globeRender(fast) {
         // cache, the column is the cached offset plus this frame's shift
         const r0 = pRow[k1];
         v = null;
-        if (r0 >= 0) {
-          let xw = (pX[k1] + shift) % nlon;
+        let xw = pX[k1] + shift;
+        if (wrap) {
+          xw %= nlon;
           if (xw < 0) xw += nlon;
+        } else {
+          if (xw < 0) xw += period;
+          else if (xw > nlon - 1) xw -= period;
+        }
+        // global grids: the last column spans up to (not including) the
+        // wrap-around, x in [nlon-1, nlon); excluding it left a seam of
+        // missing data at the grid's edge meridian while auto-rotating
+        if (r0 >= 0 && xw >= 0 && (wrap ? xw < nlon : xw <= nlon - 1)) {
           const xi = xw | 0;
           const tx = xw - xi;
-          const xj = xi + 1 === nlon ? 0 : xi + 1;
+          const xj = wrap ? (xi + 1 === nlon ? 0 : xi + 1) : Math.min(xi + 1, nlon - 1);
           const r1 = r0 + nlon < total ? r0 + nlon : r0;
           const ty = pTy[k1];
           const v00 = grid[r0 + xi], v10 = grid[r0 + xj], v01 = grid[r1 + xi], v11 = grid[r1 + xj];
-          if (v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) {
+          if (nearest || v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) {
             const vn = grid[(ty > 0.5 ? r1 : r0) + (tx > 0.5 ? xj : xi)];
             v = vn !== vn ? null : vn;
           } else {
@@ -2846,7 +3706,9 @@ function globeRender(fast) {
         const lon = lon0 + off;
         // base sphere tone with limb shading; field color composited on top
         shade = 0.7 + 0.3 * cosc;
-        v = sampleGrid(d, grid, lat, lon);
+        // (no half-cell extension here: the per-pixel cache above only
+        // covers the bilinear domain, and both passes must agree)
+        v = nearest ? sampleGridNearest(d, grid, lat, lon, false) : sampleGrid(d, grid, lat, lon);
         if (build) {
           const gy = (lat - d.lat0) / d.dlat;
           const inGrid = gy >= 0 && gy <= d.nlat - 1;
@@ -3610,7 +4472,7 @@ async function mergePlots() {
   const jobs = pinnedPoints.filter((p) => p.tsReady && p.tsJob).map((p) => p.tsJob);
   if (jobs.length < 2) return;
   try {
-    const r = await fetchJSON2("/api/timeseries/merge", { jobs });
+    const r = await fetchJSON2(`${API}/api/timeseries/merge`, { jobs });
     tsDoneJobs.unshift(r.job);
     tsDoneJobs = tsDoneJobs.slice(0, 8);
     tsSpawnCard(r.job);
@@ -3625,7 +4487,7 @@ function tsShowProgress() {
   el("load-pct").textContent = "0%";
   el("load-note").innerHTML =
     "Reading one data chunk per month from the cloud store" +
-    (state.stat !== "raw" ? " (×30 members for ensemble statistics)" : "") +
+    (state.stat !== "raw" ? ` (×${meta.n_members} members for ensemble statistics)` : "") +
     ".<br>Progress shown is real, not estimated.";
   el("load-cancel").hidden = false;
 }
@@ -3643,13 +4505,15 @@ async function tsCancel() {
   setStatus("Time series extraction cancelled");
   if (job) {
     try {
-      await fetch(`/api/timeseries/cancel/${job}`, { method: "POST" });
+      await fetch(`${API}/api/timeseries/cancel/${job}`, { method: "POST" });
     } catch { /* server may already be done; nothing to do */ }
   }
 }
 
 el("load-cancel").addEventListener("click", () => {
-  if (typeof playback !== "undefined" && playback.loading) {
+  if (typeof gif !== "undefined" && gif.busy) {
+    gif.abort = true; // the frame loop notices and aborts
+  } else if (typeof playback !== "undefined" && playback.loading) {
     playback.abort = true; // the preload loop notices and aborts
   } else if (box.pending) {
     boxCancel();
@@ -3667,7 +4531,7 @@ function tsMonthCount(start, end) {
 
 async function tsPoll(job) {
   try {
-    const s = await fetchJSON(`/api/timeseries/status/${job}`);
+    const s = await fetchJSON(`${API}/api/timeseries/status/${job}`);
     if (!currentExtraction || currentExtraction.job !== job) return; // superseded/cancelled
     if (s.error) {
       tsHideProgress();
@@ -3720,6 +4584,7 @@ async function tsExtractFor(idx) {
     return;
   }
   const payload = {
+    dataset: state.dataset,
     var: state.var,
     experiment: state.experiment,
     member: state.member,
@@ -3731,7 +4596,7 @@ async function tsExtractFor(idx) {
   };
   if (meta.variables[state.var].plev) payload.plev = state.plev;
   try {
-    const r = await fetchJSON2("/api/timeseries/start", payload);
+    const r = await fetchJSON2(`${API}/api/timeseries/start`, payload);
     currentExtraction = { job: r.job, pin: t.pin || null };
     tsShowProgress();
     tsPoll(r.job);
@@ -3797,6 +4662,7 @@ function chatEl(cls, text) {
 
 function viewSnapshot() {
   const snap = {
+    dataset: state.dataset,
     var: state.var,
     experiment: state.experiment,
     member: state.member,
@@ -3836,7 +4702,7 @@ async function sendChat(text) {
   typing.innerHTML =
     '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
   try {
-    const resp = await fetch("/api/chat", {
+    const resp = await fetch(`${API}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages: chat.messages.slice(-12), view: viewSnapshot() }),
@@ -3882,6 +4748,133 @@ el("chat-close").addEventListener("click", () => {
   el("chat-panel").hidden = true;
   el("ask-bubble").hidden = false;
 });
+
+// "Context": show, inside the conversation, the on-screen statistics
+// (and extracted series / documentation excerpts) SPEAK is given with a
+// question. Nothing is sent to the LLM.
+const CTX_TITLES = {
+  "VIEW CONTEXT (current screen)": "Current view",
+  "EXTRACTED TIME SERIES": "Extracted time series",
+  "DOCUMENTATION EXCERPTS": "Documentation excerpts (for your last question)",
+};
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+
+// The field statistics line ("area-weighted mean 11.9; min -25.5 at ...;
+// p10/p50/p90 ...; band means ...") spelled out, one bullet each.
+function ctxStatBullets(text, unit) {
+  const u = unit ? ` ${unit}` : "";
+  const out = [];
+  for (const part of text.split(/;\s+/).filter(Boolean)) {
+    let m;
+    if ((m = part.match(/^area-weighted mean (\S+)$/))) {
+      out.push(`Area-weighted mean: ${m[1]}${u} — the average over the whole field, each grid cell weighted by its area`);
+    } else if ((m = part.match(/^(min|max) (\S+) at (.+)$/))) {
+      out.push(`${m[1] === "min" ? "Minimum" : "Maximum"}: ${m[2]}${u}, at ${m[3]}`);
+    } else if ((m = part.match(/^p10\/p50\/p90 (\S+)\/(\S+)\/(\S+)$/))) {
+      out.push(`Percentiles: 10th ${m[1]}${u}, median ${m[2]}${u}, 90th ${m[3]}${u} — 10 % of the grid cells lie below the 10th percentile, half below the median, 90 % below the 90th`);
+    } else if ((m = part.match(/^band means 90S-23S (\S+), 23S-23N (\S+), 23N-90N (\S+)$/))) {
+      out.push(`Latitude-band means: southern extratropics (90°S–23°S) ${m[1]}${u}, tropics (23°S–23°N) ${m[2]}${u}, northern extratropics (23°N–90°N) ${m[3]}${u}`);
+    } else {
+      out.push(cap(part));
+    }
+  }
+  return out;
+}
+
+// "Label: a; b; c" lines become a label with a list; bare lines stay as text.
+function ctxRow(parent, line) {
+  const m = line.match(/^(\s*)([^:]{1,60}?):\s(.*)$/);
+  if (!m) {
+    const row = document.createElement("div");
+    row.className = "ctx-row";
+    row.textContent = cap(line.trim());
+    parent.appendChild(row);
+    return;
+  }
+  const label = m[2].trim();
+  const stats = label.match(/^(Displayed field|A|B|Difference A-B) \[(.+)\]$/);
+  const parts = stats ? ctxStatBullets(m[3], stats[2]) : m[3].split(/;\s+/).filter(Boolean);
+  if (stats || parts.length > 1) {
+    // block: title line, bullets underneath
+    const blk = document.createElement("div");
+    blk.className = "ctx-block" + (m[1] ? " sub" : "");
+    const t = document.createElement("div");
+    t.className = "ctx-label ctx-block-title";
+    t.textContent = stats
+      ? ({ "Displayed field": "Displayed field", A: "Selection A", B: "Selection B", "Difference A-B": "Difference A − B" }[stats[1]]
+         + ` (${stats[2]})`)
+      : label;
+    blk.appendChild(t);
+    const ul = document.createElement("ul");
+    ul.className = "ctx-list";
+    for (const p of parts) { const li = document.createElement("li"); li.textContent = cap(p); ul.appendChild(li); }
+    blk.appendChild(ul);
+    parent.appendChild(blk);
+    return;
+  }
+  const row = document.createElement("div");
+  row.className = "ctx-row" + (m[1] ? " sub" : "");
+  const lab = document.createElement("span");
+  lab.className = "ctx-label";
+  lab.textContent = label;
+  row.appendChild(lab);
+  const v = document.createElement("span");
+  v.className = "ctx-value";
+  v.textContent = m[3];
+  row.appendChild(v);
+  parent.appendChild(row);
+}
+function ctxSection(parent, title, text) {
+  const sec = document.createElement("div");
+  sec.className = "ctx-sec";
+  const h = document.createElement("div");
+  h.className = "ctx-title";
+  h.textContent = CTX_TITLES[title] || title;
+  sec.appendChild(h);
+  const blocks = title.startsWith("DOCUMENTATION") || title.startsWith("EXTRACTED") ? text.split(/\n---\n/) : [text];
+  for (const blk of blocks) {
+    const card = document.createElement("div");
+    card.className = blocks.length > 1 ? "ctx-card" : "";
+    for (const line of blk.split("\n")) if (line.trim()) ctxRow(card, line);
+    sec.appendChild(card);
+  }
+  parent.appendChild(sec);
+}
+el("chat-context").addEventListener("click", async () => {
+  const btn = el("chat-context");
+  btn.disabled = true;
+  const lastQ = [...chat.messages].reverse().find((m) => m.role === "user");
+  const holder = chatEl("bot context", "Collecting what SPEAK can see…");
+  try {
+    const resp = await fetch(`${API}/api/chat/context`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ view: viewSnapshot(), query: lastQ ? lastQ.content : null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    holder.textContent = "";
+    const head = document.createElement("div");
+    head.className = "ctx-head";
+    head.textContent = "What SPEAK sees with your next question";
+    holder.appendChild(head);
+    for (const sec of data.sections) {
+      if (sec.title === "DATASET") continue; // the dataset notes are static background
+      ctxSection(holder, sec.title, sec.text);
+    }
+    const note = document.createElement("div");
+    note.className = "ctx-note";
+    note.textContent = data.note;
+    holder.appendChild(note);
+    el("chat-messages").scrollTop = holder.offsetTop - 8;
+  } catch (err) {
+    holder.classList.add("error");
+    holder.textContent = `Could not collect the context — ${err.message || err}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 el("chat-min").addEventListener("click", () => {
   el("chat-panel").classList.toggle("minimized");
 });
@@ -3952,6 +4945,7 @@ const box = {
   range: { start: "", end: "" },
   job: null, jobSig: null,  // last completed extraction and the parameters it used
   pending: null,            // {job, fmt, sig} while an extraction runs
+  snapCtx: null,            // map view to restore after a box PNG/GIF snapshot
   pollTimer: null,
   cellsTimer: null,
   cells: null,              // {nlat, nlon, cells} for the current box on the current grid
@@ -3969,7 +4963,8 @@ const BOX_CORNERS = ["nw", "ne", "sw", "se"];
 const BOX_INFO_TEXT =
   "Drag a rectangle on the map (or type exact SW/NE corner coordinates) and " +
   "download every grid cell inside it for the current variable, scenario, " +
-  "statistic and level over the chosen month range (up to 10 years). Resize " +
+  "statistic and level over the chosen month range (any span within the scenario, subject to the " +
+  "size limit shown below). Resize " +
   "by dragging the corner handles; move by dragging the box itself. Files " +
   "carry the same provenance metadata as the other downloads, in the store's " +
   "native units; the CSV is long-form (time, lat, lon, value).";
@@ -4284,6 +5279,7 @@ function boxClear() {
 
 // ---- the card: selection summary, corner coordinates, month range, size
 function boxStatText() {
+  if (!meta.ensemble) return "single realization";
   return {
     raw: `member ${state.member}`,
     mean: "ensemble mean",
@@ -4312,11 +5308,11 @@ function boxRefresh() {
 
   const v = meta.variables[state.var];
   el("box-sel").textContent =
-    `${v.label} (${state.var}) · ${EXP_SHORT[state.experiment] || state.experiment} · ` +
+    `${v.label} (${state.var}) · ${expShort(state.experiment)} · ` +
     `${boxStatText()}${v.plev ? ` · ${state.plev} hPa` : ""}`;
 
   // month range: default to the displayed month; keep inside the scenario
-  const exp = meta.experiments[state.experiment];
+  const exp = expMonths(meta.experiments[state.experiment]);
   const cur = el("month-input").value || exp.start;
   const inExp = (m) => /^\d{4}-\d{2}$/.test(m) && m >= exp.start && m <= exp.end;
   if (!inExp(box.range.start)) box.range.start = inExp(cur) ? cur : exp.start;
@@ -4324,8 +5320,7 @@ function boxRefresh() {
   const maxEnd = boxMaxEnd(box.range.start, exp.end);
   if (box.range.end > maxEnd) box.range.end = maxEnd;
   for (const id of ["box-start", "box-end"]) {
-    el(id).min = exp.start;
-    el(id).max = exp.end;
+    el(id).title = `YYYY-MM (or just YYYY), ${exp.start} to ${exp.end}`;
   }
   boxSetInput("box-start", box.range.start);
   boxSetInput("box-end", box.range.end);
@@ -4338,7 +5333,9 @@ function boxRefresh() {
 }
 
 function boxMaxEnd(start, expEnd) {
-  const limit = ((meta && meta.box_limits && meta.box_limits.months) || 120) - 1;
+  const months = meta && meta.box_limits && meta.box_limits.months;
+  if (!months) return expEnd; // no month cap: the value limit bounds the size
+  const limit = months - 1;
   const [y, m] = start.split("-").map(Number);
   const total = (m - 1) + limit;
   const maxEnd = `${String(y + Math.floor(total / 12)).padStart(4, "0")}-${String((total % 12) + 1).padStart(2, "0")}`;
@@ -4351,11 +5348,11 @@ function boxFetchCells() {
     const b = box.bounds;
     if (!b) return;
     const params = new URLSearchParams({
-      var: state.var, experiment: state.experiment,
+      dataset: state.dataset, var: state.var, experiment: state.experiment,
       south: b.south, north: b.north, west: b.west, east: b.east,
     });
     try {
-      const r = await fetchJSON(`/api/box/cells?${params}`);
+      const r = await fetchJSON(`${API}/api/box/cells?${params}`);
       if (box.bounds !== b) return; // box changed meanwhile
       box.cells = r;
       boxUpdateSize();
@@ -4384,6 +5381,7 @@ function boxUpdateSize() {
   out.classList.toggle("over", over);
   for (const id of ["box-dl-nc", "box-dl-csv"]) el(id).disabled = over || !!box.pending;
   el("box-dl-png").disabled = !!box.pending || !!snap.busy;
+  el("box-dl-gif").disabled = !!box.pending || !!snap.busy || state.compare;
   boxRenderGrid();
 }
 
@@ -4467,11 +5465,11 @@ function boxRangeChanged(which) {
   let v = input.value.trim();
   if (/^\d{4}$/.test(v)) v = `${v}-${which === "start" ? "01" : "12"}`;
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(v)) {
-    setStatus("Box: type months as YYYY-MM", true);
+    setStatus("Box: type months as YYYY-MM (or just YYYY)", true);
     boxRefresh();
     return;
   }
-  const exp = meta.experiments[state.experiment];
+  const exp = expMonths(meta.experiments[state.experiment]);
   if (v < exp.start) v = exp.start;
   if (v > exp.end) v = exp.end;
   box.range[which] = v;
@@ -4490,6 +5488,7 @@ function boxRangeChanged(which) {
 function boxPayload() {
   const b = box.bounds;
   const payload = {
+    dataset: state.dataset,
     var: state.var, experiment: state.experiment, member: state.member, stat: state.stat,
     box: { south: b.south, north: b.north, west: b.west, east: b.east },
     start: box.range.start, end: box.range.end,
@@ -4500,7 +5499,7 @@ function boxPayload() {
 
 function boxOpenDownload(job, fmt) {
   const a = document.createElement("a");
-  a.href = `/api/box/data/${job}?format=${fmt}`;
+  a.href = `${API}/api/box/data/${job}?format=${fmt}`;
   a.download = "";
   document.body.appendChild(a);
   a.click();
@@ -4520,7 +5519,7 @@ async function boxDownload(fmt) {
     return;
   }
   try {
-    const r = await fetchJSON2("/api/box/start", payload);
+    const r = await fetchJSON2(`${API}/api/box/start`, payload);
     box.pending = { job: r.job, fmt, sig };
     boxUpdateSize();
     boxShowProgress(r);
@@ -4537,7 +5536,7 @@ function boxShowProgress(r) {
   el("load-note").innerHTML =
     `${r.cells.toLocaleString()} grid cells × ${r.months} month${r.months === 1 ? "" : "s"}. ` +
     "Reading one data chunk per month from the cloud store" +
-    (state.stat !== "raw" ? " (×30 members for ensemble statistics)" : "") +
+    (state.stat !== "raw" ? ` (×${meta.n_members} members for ensemble statistics)` : "") +
     ".<br>Progress shown is real, not estimated.";
   el("load-cancel").hidden = false;
 }
@@ -4550,7 +5549,7 @@ function boxHideProgress() {
 
 async function boxPoll(job) {
   try {
-    const s = await fetchJSON(`/api/box/status/${job}`);
+    const s = await fetchJSON(`${API}/api/box/status/${job}`);
     if (!box.pending || box.pending.job !== job) return; // cancelled / superseded
     if (s.error) {
       box.pending = null;
@@ -4589,7 +5588,7 @@ async function boxCancel() {
   setStatus("Box extraction cancelled");
   if (job) {
     try {
-      await fetch(`/api/box/cancel/${job}`, { method: "POST" });
+      await fetch(`${API}/api/box/cancel/${job}`, { method: "POST" });
     } catch { /* server may already be done */ }
   }
 }
@@ -4601,6 +5600,7 @@ el("box-card-close").addEventListener("click", boxClear);
 el("box-dl-nc").addEventListener("click", () => boxDownload("nc"));
 el("box-dl-csv").addEventListener("click", () => boxDownload("csv"));
 el("box-dl-png").addEventListener("click", () => boxDownloadPNG());
+el("box-dl-gif").addEventListener("click", () => gifRun("box"));
 for (const input of document.querySelectorAll(".box-corner input[data-edge]")) {
   input.addEventListener("change", () => boxCornerChanged(input));
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
@@ -4622,6 +5622,9 @@ el("box-lock").addEventListener("change", (e) => {
 });
 el("box-start").addEventListener("change", () => boxRangeChanged("start"));
 el("box-end").addEventListener("change", () => boxRangeChanged("end"));
+for (const id of ["box-start", "box-end"]) {
+  el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+}
 el("box-info").addEventListener("click", (e) => {
   e.stopPropagation();
   showInfoPopover(BOX_INFO_TEXT, e.clientX, e.clientY);
@@ -4681,6 +5684,10 @@ const CONTOUR_CASING = "rgba(0, 0, 0, 0.6)";
 const CONTOUR_MAX_LEVELS = 60;
 const CONTOUR_MAX_LABELS = 90;
 map.createPane("contours").style.zIndex = 435; // above borders (430), below particles (440)
+// Value labels get their own pane just above the lines: a marker's own
+// z-index is its pixel y (negative above the pane origin), which would
+// otherwise sink labels below the contour canvas after panning.
+map.createPane("contourLabels").style.zIndex = 436;
 map.getPane("contours").style.pointerEvents = "none";
 const contourRenderer = L.canvas({ pane: "contours" });
 const CONTOUR_INFO_TEXT =
@@ -4840,11 +5847,12 @@ function contourSegments(d, levels) {
   const nl = levels.length;
   const segs = levels.map(() => []);
   const W = nlon + 1;
+  const jEnd = d.wrap === false ? nlon - 1 : nlon; // regional grids have no seam cell
   const pt = [null, null, null, null]; // bottom, right, top, left
   for (let i = 0; i < nlat - 1; i++) {
     const latA = lat0 + i * dlat, latB = latA + dlat;
     const rowA = i * nlon, rowB = rowA + nlon;
-    for (let j = 0; j < nlon; j++) {
+    for (let j = 0; j < jEnd; j++) {
       const j1 = j + 1 === nlon ? 0 : j + 1;
       const v00 = g[rowA + j], v10 = g[rowA + j1], v01 = g[rowB + j], v11 = g[rowB + j1];
       if (v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) continue;
@@ -5039,7 +6047,7 @@ function contoursPlaceLabels() {
             let deg = (Math.atan2(pt.y - prev.y, pt.x - prev.x) * 180) / Math.PI;
             if (deg > 90) deg -= 180; else if (deg < -90) deg += 180; // never upside down
             L.marker(ll, {
-              pane: "contours", interactive: false, keyboard: false,
+              pane: "contourLabels", interactive: false, keyboard: false,
               icon: L.divIcon({
                 className: "contour-label",
                 html: `<span style="color:${lv.color};transform:translate(-50%,-50%) rotate(${deg.toFixed(0)}deg)">${text}</span>`,
@@ -5254,11 +6262,11 @@ async function snapSVGImage(svgEl, w, h) {
 }
 
 // The flat map: everything inside #map except the Leaflet controls.
-async function snapshotMap() {
+async function snapshotMap(opts = {}) {
   const container = el("map");
   const rect = container.getBoundingClientRect();
   const W = Math.round(rect.width), H = Math.round(rect.height);
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = opts.dpr || Math.min(window.devicePixelRatio || 1, 2);
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(W * dpr);
   canvas.height = Math.round(H * dpr);
@@ -5312,9 +6320,9 @@ async function snapshotMap() {
 }
 
 // The globe: its two canvases plus the station cards on top.
-async function snapshotGlobe() {
+async function snapshotGlobe(opts = {}) {
   const W = window.innerWidth, H = window.innerHeight;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = opts.dpr || Math.min(window.devicePixelRatio || 1, 2);
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(W * dpr);
   canvas.height = Math.round(H * dpr);
@@ -5378,14 +6386,22 @@ function snapTitle() {
   const d = currentDisplay;
   if (!d) return "";
   if (d.isDiff) return `${d.label} · A: ${selLabel(currentField)} · B: ${selLabel(currentFieldB)}`;
-  return `${statPrefix(d)}${d.label} · ${EXP_SHORT[state.experiment] || state.experiment} · ${selLabel(d)}`;
+  return `${statPrefix(d)}${d.label} · ${expShort(state.experiment)} · ${selLabel(d)}`;
 }
 
 // shot: canvas at device resolution covering imgW×imgH CSS px.
+// opts.uiScale enlarges the margins, text and ticks (used when the shot is
+// a downscaled GIF frame, so the frame furniture stays its usual size).
+function snapFont(weight, px, k) {
+  return `${weight === 400 ? "" : `${weight} `}${px * k}px system-ui, -apple-system, 'Segoe UI', sans-serif`;
+}
+
 function snapFrame(shot, imgW, imgH, opts = {}) {
   const dpr = shot.width / imgW;
+  const k = opts.uiScale || 1;
   const axes = opts.axes;
-  const mL = axes ? 66 : 24, mB = axes ? 46 : 24, mT = opts.title ? 44 : 24, mR = 24;
+  const legend = opts.legend;
+  const mL = (axes ? 84 : 24) * k, mB = (axes ? 64 : 24) * k, mT = (opts.title ? 44 : 24) * k, mR = (legend ? 116 : 24) * k;
   const W = imgW + mL + mR, H = imgH + mT + mB;
   const out = document.createElement("canvas");
   out.width = Math.round(W * dpr);
@@ -5396,22 +6412,22 @@ function snapFrame(shot, imgW, imgH, opts = {}) {
   ctx.fillRect(0, 0, W, H);
   ctx.drawImage(shot, mL, mT, imgW, imgH);
   ctx.strokeStyle = "#2a2a2a";
-  ctx.lineWidth = 1;
+  ctx.lineWidth = k;
   ctx.strokeRect(mL + 0.5, mT + 0.5, imgW - 1, imgH - 1);
 
   ctx.fillStyle = "#1a1a1a";
   ctx.textBaseline = "alphabetic";
   if (opts.title) {
-    ctx.font = "600 15px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.font = snapFont(600, 15, k);
     ctx.textAlign = "left";
     let title = opts.title;
     while (ctx.measureText(title).width > W - mL - mR && title.length > 8) title = title.slice(0, -2).trimEnd() + "…";
-    ctx.fillText(title, mL, mT - 16);
+    ctx.fillText(title, mL, mT - 16 * k);
   }
   if (axes) {
-    ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.font = snapFont(400, 12, k);
     ctx.strokeStyle = "#2a2a2a";
-    const tick = 6;
+    const tick = 6 * k;
     // longitudes along the bottom (ticks mirrored on top)
     ctx.textAlign = "center";
     for (const t of axes.lon) {
@@ -5420,7 +6436,7 @@ function snapFrame(shot, imgW, imgH, opts = {}) {
       ctx.moveTo(x, mT + imgH); ctx.lineTo(x, mT + imgH + tick);
       ctx.moveTo(x, mT); ctx.lineTo(x, mT - tick);
       ctx.stroke();
-      ctx.fillText(t.label, x, mT + imgH + tick + 15);
+      ctx.fillText(t.label, x, mT + imgH + tick + 15 * k);
     }
     // latitudes down the left (ticks mirrored on the right)
     ctx.textAlign = "right";
@@ -5430,34 +6446,109 @@ function snapFrame(shot, imgW, imgH, opts = {}) {
       ctx.moveTo(mL, y); ctx.lineTo(mL - tick, y);
       ctx.moveTo(mL + imgW, y); ctx.lineTo(mL + imgW + tick, y);
       ctx.stroke();
-      ctx.fillText(t.label, mL - tick - 5, y + 4);
+      ctx.fillText(t.label, mL - tick - 5 * k, y + 4 * k);
     }
+    // axis titles
+    ctx.font = snapFont(600, 13, k);
+    ctx.textAlign = "center";
+    ctx.fillText("Longitude", mL + imgW / 2, mT + imgH + mB - 12 * k);
+    ctx.save();
+    ctx.translate(16 * k, mT + imgH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Latitude", 0, 0);
+    ctx.restore();
   }
+  if (legend) snapColorbar(ctx, legend, mL + imgW + 30 * k, mT, imgH, k);
   return out;
+}
+
+// Vertical colour bar in the export's right margin: a copy of the on-screen
+// legend (so banding and the chosen colour scale match the map), composited
+// over white, with its tick labels and units.
+function snapColorbar(ctx, legend, x, top, imgH, k = 1) {
+  const src = el("legend-canvas");
+  const sctx = src.getContext("2d");
+  const px = sctx.getImageData(0, 0, src.width, 1).data; // one row is enough: columns are uniform
+  const barW = 16 * k, barH = Math.max(120 * k, Math.min(Math.round(imgH * 0.6), 320 * k));
+  const y0 = top + Math.round((imgH - barH) / 2);
+  for (let y = 0; y < barH; y++) {
+    const c = Math.round(((barH - 1 - y) / (barH - 1)) * (src.width - 1));
+    const i = c * 4, a = px[i + 3] / 255;
+    const r = Math.round(px[i] * a + 255 * (1 - a));
+    const g = Math.round(px[i + 1] * a + 255 * (1 - a));
+    const b = Math.round(px[i + 2] * a + 255 * (1 - a));
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(x, y0 + y, barW, 1);
+  }
+  ctx.strokeStyle = "#2a2a2a";
+  ctx.lineWidth = k;
+  ctx.strokeRect(x + 0.5, y0 + 0.5, barW - 1, barH - 1);
+  ctx.fillStyle = "#1a1a1a";
+  ctx.font = snapFont(400, 12, k);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const n = legend.ticks.length;
+  for (let i = 0; i < n; i++) {   // ticks are evenly spaced along the legend, lowest at the bottom
+    const y = Math.round(y0 + barH - 1 - (barH - 1) * (n > 1 ? i / (n - 1) : 0)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x + barW, y); ctx.lineTo(x + barW + 5 * k, y); ctx.stroke();
+    ctx.fillText(legend.ticks[i], x + barW + 8 * k, y);
+  }
+  // title sideways along the bar, to the right of the tick labels:
+  // "Variable (units)", reading bottom-to-top like a matplotlib colorbar
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "center";
+  ctx.font = snapFont(600, 13, k);
+  let title = `${legend.label} (${legend.units})`;
+  while (ctx.measureText(title).width > barH + 60 * k && title.length > 8) title = title.slice(0, -2).trimEnd() + "…";
+  const tickW = Math.max(0, ...legend.ticks.map((t) => ctx.measureText(t).width));
+  ctx.save();
+  ctx.translate(x + barW + 8 * k + tickW + 16 * k, y0 + barH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(title, 0, 0);
+  ctx.restore();
 }
 
 function snapStem() {
   const d = currentDisplay;
   const time = el("month-input").value || "";
-  if (!d) return `spear_view_${time}`;
-  const statTok = { raw: state.member, mean: "ensmean", spread: "ensspread", anom: `anom${state.member}` }[state.stat] || state.stat;
-  return `spear_${d.isDiff ? "diff_" : ""}${d.var}_${state.experiment}_${statTok}_${time}`;
+  const ds = state.dataset || "view";
+  if (!d) return `${ds}_view_${time}`;
+  const statTok = meta && meta.ensemble
+    ? ({ raw: state.member, mean: "ensmean", spread: "ensspread", anom: `anom${state.member}` }[state.stat] || state.stat)
+    : null;
+  return [ds, d.isDiff ? "diff" : null, d.var, state.experiment.replace(/\//g, "_"), statTok, time].filter(Boolean).join("_");
+}
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 function snapSave(canvas, filename) {
   return new Promise((resolve) => {
     canvas.toBlob((blob) => {
       if (!blob) { setStatus("PNG export failed (canvas could not be encoded)", true); resolve(false); return; }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      saveBlob(blob, filename);
       resolve(true);
     }, "image/png");
+  });
+}
+
+// The current map or globe view as a framed figure (title, axes, colour
+// bar). opts.maxWidth caps the view's width in output pixels (GIF frames).
+async function snapCaptureView(opts = {}) {
+  const size = globe.open ? { x: window.innerWidth, y: window.innerHeight } : map.getSize();
+  const dpr = opts.maxWidth ? Math.min(1, opts.maxWidth / size.x) : undefined;
+  const shot = globe.open ? await snapshotGlobe({ dpr }) : await snapshotMap({ dpr });
+  const axes = globe.open ? null : snapAxisTicks(0, 0, size.x, size.y);
+  return snapFrame(shot, size.x, size.y, {
+    title: snapTitle(), axes, legend: snapLegend, uiScale: dpr ? 1 / dpr : 1,
   });
 }
 
@@ -5467,12 +6558,7 @@ async function downloadViewPNG() {
   el("dl-png").disabled = true;
   setStatus("Rendering PNG of the current view…");
   try {
-    const shot = globe.open ? await snapshotGlobe() : await snapshotMap();
-    const size = globe.open ? { w: window.innerWidth, h: window.innerHeight } : map.getSize();
-    const axes = globe.open ? null : snapAxisTicks(0, 0, size.x, size.y);
-    const canvas = snapFrame(shot, globe.open ? size.w : size.x, globe.open ? size.h : size.y, {
-      title: snapTitle(), axes,
-    });
+    const canvas = await snapCaptureView();
     const ok = await snapSave(canvas, `${snapStem()}_${globe.open ? "globe" : "map"}.png`);
     if (ok) setStatus(`PNG saved (${canvas.width}×${canvas.height})`);
   } catch (e) {
@@ -5500,52 +6586,501 @@ function snapWaitForTiles(maxMs = 5000) {
 // PNG of just the box: fit the map to the box (so all of it is on screen
 // at the best zoom), snapshot, crop to the box's pixel rectangle, then
 // restore the previous view. The outline and handles are hidden for the
-// shot so only the contents remain.
+// shot so only the contents remain. Split into begin / capture / end so
+// the GIF export can capture many frames in one fitted view.
+async function boxSnapBegin() {
+  boxUpdateSize();
+  box.snapCtx = {
+    wasGlobe: globe.open, prevCenter: map.getCenter(), prevZoom: map.getZoom(),
+    handles: BOX_CORNERS.map((c) => box.handles[c] && box.handles[c].getElement()).filter(Boolean),
+  };
+  const c = box.snapCtx;
+  if (c.wasGlobe) await toggleGlobe({ sync: false });
+  map.fitBounds(box.rect.getBounds(), { animate: false, padding: [8, 8] });
+  box.rect.setStyle({ opacity: 0, fillOpacity: 0 });
+  c.handles.forEach((h) => { h.style.visibility = "hidden"; });
+  await snapWaitForTiles();
+  await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
+}
+
+// Snapshot the fitted map, crop to the box and frame it (title, axes,
+// colour bar). opts.maxWidth caps the box's width in output pixels.
+async function boxSnapCapture(opts = {}) {
+  const lb = box.rect.getBounds();
+  const nw = map.latLngToContainerPoint(lb.getNorthWest());
+  const se = map.latLngToContainerPoint(lb.getSouthEast());
+  const size = map.getSize();
+  const x0 = Math.max(0, Math.min(nw.x, se.x)), y0 = Math.max(0, Math.min(nw.y, se.y));
+  const x1 = Math.min(size.x, Math.max(nw.x, se.x)), y1 = Math.min(size.y, Math.max(nw.y, se.y));
+  const w = Math.max(1, Math.round(x1 - x0)), h = Math.max(1, Math.round(y1 - y0));
+  const dprCap = opts.maxWidth ? Math.min(1, opts.maxWidth / w) : undefined;
+  const full = await snapshotMap({ dpr: dprCap });
+  const dpr = full.width / el("map").getBoundingClientRect().width;
+  const crop = document.createElement("canvas");
+  crop.width = Math.round(w * dpr);
+  crop.height = Math.round(h * dpr);
+  crop.getContext("2d").drawImage(full, x0 * dpr, y0 * dpr, w * dpr, h * dpr, 0, 0, crop.width, crop.height);
+  const b = box.bounds;
+  return snapFrame(crop, w, h, {
+    legend: snapLegend,
+    title: `${snapTitle()} · box ${snapFmtLat(b.south)} to ${snapFmtLat(b.north)}, ` +
+           `${snapFmtLon(b.west)} to ${snapFmtLon(b.east)}`,
+    axes: snapAxisTicks(x0, y0, w, h),
+    uiScale: dprCap ? 1 / dprCap : 1,
+  });
+}
+
+async function boxSnapEnd() {
+  const c = box.snapCtx;
+  box.snapCtx = null;
+  if (!c) return;
+  if (box.rect) box.rect.setStyle({ opacity: 1, fillOpacity: BOX_STYLE.fillOpacity });
+  c.handles.forEach((h) => { h.style.visibility = ""; });
+  map.setView(c.prevCenter, c.prevZoom, { animate: false });
+  if (c.wasGlobe) await toggleGlobe({ sync: false });
+  boxUpdateSize();
+}
+
 async function boxDownloadPNG() {
   if (!box.bounds || !box.rect || snap.busy) return;
   snap.busy = true;
-  boxUpdateSize();
   setStatus("Rendering PNG of the box contents…");
-  const wasGlobe = globe.open;
-  const prevCenter = map.getCenter(), prevZoom = map.getZoom();
-  const handles = BOX_CORNERS.map((c) => box.handles[c] && box.handles[c].getElement()).filter(Boolean);
   try {
-    if (wasGlobe) await toggleGlobe({ sync: false });
-    const lb = box.rect.getBounds();
-    map.fitBounds(lb, { animate: false, padding: [8, 8] });
-    box.rect.setStyle({ opacity: 0, fillOpacity: 0 });
-    handles.forEach((h) => { h.style.visibility = "hidden"; });
-    await snapWaitForTiles();
-    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
-    const full = await snapshotMap();
-    const dpr = full.width / el("map").getBoundingClientRect().width;
-    const nw = map.latLngToContainerPoint(lb.getNorthWest());
-    const se = map.latLngToContainerPoint(lb.getSouthEast());
-    const size = map.getSize();
-    const x0 = Math.max(0, Math.min(nw.x, se.x)), y0 = Math.max(0, Math.min(nw.y, se.y));
-    const x1 = Math.min(size.x, Math.max(nw.x, se.x)), y1 = Math.min(size.y, Math.max(nw.y, se.y));
-    const w = Math.max(1, Math.round(x1 - x0)), h = Math.max(1, Math.round(y1 - y0));
-    const crop = document.createElement("canvas");
-    crop.width = Math.round(w * dpr);
-    crop.height = Math.round(h * dpr);
-    crop.getContext("2d").drawImage(full, x0 * dpr, y0 * dpr, w * dpr, h * dpr, 0, 0, crop.width, crop.height);
+    await boxSnapBegin();
+    const out = await boxSnapCapture();
     const b = box.bounds;
-    const out = snapFrame(crop, w, h, {
-      title: `${snapTitle()} · box ${snapFmtLat(b.south)} to ${snapFmtLat(b.north)}, ` +
-             `${snapFmtLon(b.west)} to ${snapFmtLon(b.east)}`,
-      axes: snapAxisTicks(x0, y0, w, h),
-    });
     const f = (v) => v.toFixed(2).replace("-", "m");
     const ok = await snapSave(out, `${snapStem()}_box_${f(b.south)}_${f(b.north)}_${f(normLon(b.west))}_${f(normLon(b.east))}.png`);
     if (ok) setStatus(`Box PNG saved (${out.width}×${out.height})`);
   } catch (e) {
     setStatus(`Box PNG failed: ${e.message || e}`, true);
   } finally {
-    box.rect.setStyle({ opacity: 1, fillOpacity: BOX_STYLE.fillOpacity });
-    handles.forEach((h) => { h.style.visibility = ""; });
-    map.setView(prevCenter, prevZoom, { animate: false });
-    if (wasGlobe) await toggleGlobe({ sync: false });
+    await boxSnapEnd();
     snap.busy = false;
     boxUpdateSize();
   }
 }
+
+// ------------------------------------------------- animated GIF export
+// Steps the selection through a time range, snapshots every frame the way
+// the PNG export does (the map or globe view, or just the box contents)
+// and encodes them in the browser (vendor/gifenc.esm.js). All frames share
+// one colour scale and one palette, so nothing flickers between frames.
+// Progress is per frame, with a running time-remaining estimate.
+//
+// Two ways to build, chosen by gifStreams():
+//  - streamed: fetch, paint, snapshot, encode and drop one frame at a time
+//    (flat memory, so long runs are fine). Possible when the colour scale
+//    is fixed: a plain member/value of a variable with a hand-built scale.
+//  - held: ensemble statistics and auto-scaled variables pick one scale
+//    from the 2nd–98th percentiles of EVERY frame, so all fields are
+//    fetched first (about 1 MB each) and then rendered.
+const GIF_MAX_FRAMES = { stream: 1500, held: 366 };
+const GIF_SIZES = [["1600", "Large"], ["1100", "Medium"], ["700", "Small"]]; // max frame width, px
+const GIF_RENDER_GUESS_MS = 500; // per-frame render + encode guess until measured
+const GIF_INFO_TEXT =
+  "Steps the current variable, scenario, statistic and level through the " +
+  "range and saves the frames as one animated GIF of the map or globe view, " +
+  "framed like the PNG export with whatever labels, contours and stations " +
+  "are shown. All frames share one colour scale and one colour palette. " +
+  "Frame is how long each time step shows. Every N takes every Nth month " +
+  "(or day): 12 on monthly data gives one frame per year, 7 on daily data " +
+  "one per week. Size caps the frame width (smaller frames make a much " +
+  `smaller file). Plain member/value animations are built one frame at a time (up to ` +
+  `${GIF_MAX_FRAMES.stream} frames); ensemble statistics and auto-scaled variables are ` +
+  `fetched in full first to fix one colour scale (up to ${GIF_MAX_FRAMES.held} frames). ` +
+  "The box card's GIF button does the same for just the box contents over its Months range.";
+const gif = { busy: false, abort: false, width: 1100 };
+
+function gifLib() {
+  const g = window.GIFENC;
+  if (!g) throw new Error("GIF encoder did not load (vendor/gifenc.esm.js)");
+  return g;
+}
+
+function gifStreams() {
+  const stat = state.stat || "raw";
+  return stat === "raw" && !varConfigFor(state.var).dynamic;
+}
+function gifMaxFrames() { return gifStreams() ? GIF_MAX_FRAMES.stream : GIF_MAX_FRAMES.held; }
+
+function gifStride() {
+  const v = Math.round(+el("gif-stride").value);
+  return Number.isFinite(v) && v >= 1 ? Math.min(v, 366) : 1;
+}
+
+function gifDelay() {
+  const v = Math.round(+el("gif-delay").value);
+  return Number.isFinite(v) && v >= 20 ? Math.min(v, 10000) : 500;
+}
+
+// "YYYY", "YYYY-MM" or "YYYY-MM-DD" -> a time at the variable's frequency
+// (start of the period for a range start, end of it for a range end), or
+// null if it doesn't parse.
+function gifParseTime(v, isEnd) {
+  v = (v || "").trim();
+  let y, m, d;
+  if (/^\d{4}$/.test(v)) { y = v; m = isEnd ? "12" : "01"; }
+  else if (/^\d{4}-(0[1-9]|1[0-2])$/.test(v)) { [y, m] = v.split("-"); }
+  else if (/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(v)) { [y, m, d] = v.split("-"); }
+  else return null;
+  if (timeFreq() !== "day") return `${y}-${m}`;
+  return d ? `${y}-${m}-${d}` : toDayStr(`${y}-${m}`, isEnd);
+}
+
+// Every `step`-th time from start to end (inclusive), clipped to the
+// scenario. Stops one past the frame cap so callers can tell "too many".
+function gifTimes(start, end, step = 1) {
+  const exp = meta.experiments[state.experiment];
+  const cap = gifMaxFrames();
+  const out = [];
+  step = Math.max(1, step | 0);
+  if (timeFreq() === "day") {
+    const lo = toDayStr(start, false), hi = toDayStr(end, true);
+    const eLo = toDayStr(exp.start, false), eHi = toDayStr(exp.end, true);
+    const first = lo < eLo ? eLo : lo, last = hi > eHi ? eHi : hi;
+    const d = new Date(`${first}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return out;
+    while (out.length <= cap) {
+      const t = d.toISOString().slice(0, 10);
+      if (t > last) break;
+      out.push(t);
+      d.setUTCDate(d.getUTCDate() + step);
+    }
+  } else {
+    const e = expMonths(exp);
+    const s = toMonthStr(start), en = toMonthStr(end);
+    const first = s < e.start ? e.start : s, last = en > e.end ? e.end : en;
+    let [y, m] = first.split("-").map(Number);
+    while (out.length <= cap) {
+      const t = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}`;
+      if (t > last) break;
+      out.push(t);
+      m += step;
+      while (m > 12) { m -= 12; y += 1; }
+    }
+  }
+  return out;
+}
+
+// Default range: a year from the selected month (a month from the
+// selected day for daily data), clipped to the scenario.
+function gifDefaultRange() {
+  const exp = meta.experiments[state.experiment];
+  const cur = el("month-input").value;
+  if (timeFreq() === "day") {
+    const s = toDayStr(cur || exp.start, false);
+    const d = new Date(`${s}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 29);
+    const e = d.toISOString().slice(0, 10), eHi = toDayStr(exp.end, true);
+    return { start: s, end: e > eHi ? eHi : e };
+  }
+  const em = expMonths(exp);
+  const s = toMonthStr(cur) || em.start;
+  let [y, m] = s.split("-").map(Number);
+  m += 11;
+  if (m > 12) { m -= 12; y += 1; }
+  const e = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}`;
+  return { start: s, end: e > em.end ? em.end : e };
+}
+
+function fmtDuration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60), r = s % 60;
+  return r ? `${m} min ${r} s` : `${m} min`;
+}
+
+function gifToggleCard(open) {
+  const card = el("gif-card");
+  const show = open == null ? card.hidden : open;
+  if (show && !meta) return;
+  if (show) {
+    const r = gifDefaultRange();
+    const daily = timeFreq() === "day";
+    for (const [id, v] of [["gif-start", r.start], ["gif-end", r.end]]) {
+      const input = el(id);
+      input.placeholder = daily ? "YYYY-MM-DD" : "YYYY-MM";
+      input.title = `${daily ? "YYYY-MM-DD, YYYY-MM" : "YYYY-MM"} or just YYYY`;
+      if (!input.value) input.value = v; // keep a range the user already typed
+    }
+  }
+  card.hidden = !show;
+  el("dl-gif").classList.toggle("active", show);
+  gifRefreshNote();
+}
+
+// Frame count and play length under the inputs (red when unusable).
+function gifRefreshNote() {
+  const note = el("gif-note");
+  if (!note || el("gif-card").hidden || !meta) return;
+  const daily = timeFreq() === "day";
+  const unit = daily ? "day" : "month";
+  el("gif-stride-unit").textContent = `${unit}s`;
+  const s = gifParseTime(el("gif-start").value, false), e = gifParseTime(el("gif-end").value, true);
+  const step = gifStride(), cap = gifMaxFrames();
+  let msg, bad = false;
+  if (!s || !e) { msg = `Type times as ${daily ? "YYYY-MM-DD" : "YYYY-MM"} (or just YYYY).`; bad = true; }
+  else if (e < s) { msg = "The end is before the start."; bad = true; }
+  else {
+    const times = gifTimes(s, e, step), n = times.length;
+    if (n < 2) { msg = "The range needs at least 2 frames inside the scenario."; bad = true; }
+    else if (n > cap) {
+      msg = `More than ${cap} frames — shorten the range or raise Every N` +
+            (gifStreams() ? "." : ` (statistics and auto-scaled variables hold every field in memory to share one colour scale).`);
+      bad = true;
+    }
+    else if (state.compare) { msg = "Not available in compare mode (A − B)."; bad = true; }
+    else {
+      const delay = gifDelay();
+      msg = `${n} frames${step > 1 ? ` (every ${step} ${unit}s)` : ""}, ${times[0]} to ${times[n - 1]} · ` +
+            `plays in ${fmtDuration(n * delay)} at ${delay} ms per frame`;
+    }
+  }
+  note.textContent = msg;
+  note.classList.toggle("over", bad);
+  el("gif-make").disabled = bad || gif.busy;
+}
+
+function gifSetBusy(busy) {
+  for (const id of ["dl-gif", "dl-png"]) el(id).disabled = busy;
+  gifRefreshNote();
+  boxUpdateSize(); // the box card's PNG/GIF buttons follow snap.busy
+}
+
+// Resolves once the overlay shows a new image (renderMeta repaints it
+// asynchronously via toBlob), or after a timeout as a safety net.
+function gifWaitOverlay(timeoutMs = 10000) {
+  const img0 = overlays[0] && overlays[0]._image;
+  const prevSrc = img0 ? img0.src : null;
+  const t0 = performance.now();
+  return new Promise((resolve) => {
+    const check = () => {
+      const img = overlays[0] && overlays[0]._image;
+      const fresh = img && img.src !== prevSrc && img.complete && img.naturalWidth > 0;
+      if (fresh || performance.now() - t0 > timeoutMs) resolve();
+      else setTimeout(check, 25);
+    };
+    setTimeout(check, 25);
+  });
+}
+
+// Progress overlay: percent and the time remaining from the measured
+// per-frame rate. A held build has two phases (fetch all, then render);
+// a streamed build is one phase where each frame fetches as it renders.
+function gifProgress(p) {
+  const now = performance.now();
+  const n = p.n;
+  let left, what, pct;
+  if (p.stream) {
+    pct = (p.rendered / n) * 99;
+    const per = p.rendered ? (now - p.tRender) / p.rendered : null;
+    left = per == null ? null : per * (n - p.rendered);
+    what = `Frame ${Math.min(p.rendered + 1, n)} of ${n}` + (p.wind ? " (field + wind)" : "");
+  } else if (p.tRender == null) {
+    pct = (p.fetched / (2 * n)) * 99;
+    const per = p.fetched ? (now - p.tFetch) / p.fetched : null;
+    left = per == null ? null : per * (n - p.fetched) + n * GIF_RENDER_GUESS_MS;
+    what = `Fetching frame ${Math.min(p.fetched + 1, n)} of ${n}` + (p.wind ? " (field + wind)" : "");
+  } else {
+    pct = ((n + p.rendered) / (2 * n)) * 99;
+    const per = p.rendered ? (now - p.tRender) / p.rendered : null;
+    left = per == null ? null : per * (n - p.rendered);
+    what = `Rendering frame ${Math.min(p.rendered + 1, n)} of ${n}`;
+  }
+  el("load-pct").textContent = `${Math.round(pct)}%`;
+  el("load-note").innerHTML =
+    `${what} · ${p.time}<br>` +
+    (left == null
+      ? "Estimating time remaining…"
+      : `About ${fmtDuration(left)} remaining` + (!p.stream && p.tRender == null ? " (rendering time estimated)" : ""));
+}
+
+// One palette for every frame. Quantizing each frame on its own makes the
+// colour bar (and the map colours) shift from frame to frame as the 256
+// cut points move. Built from the first frame plus, weighted at a few
+// percent of the pixels, the colour bar as drawn and the colour scale
+// itself, so every ramp colour survives the cut even if the first frame
+// barely uses it.
+function gifPalette(enc, data) {
+  const extras = [];
+  const src = el("legend-canvas");
+  const row = src.getContext("2d").getImageData(0, 0, src.width, 1).data;
+  const bar = new Uint8ClampedArray(row.length);
+  for (let i = 0; i < row.length; i += 4) { // composited over white, as snapColorbar draws it
+    const al = row[i + 3] / 255;
+    bar[i] = row[i] * al + 255 * (1 - al);
+    bar[i + 1] = row[i + 1] * al + 255 * (1 - al);
+    bar[i + 2] = row[i + 2] * al + 255 * (1 - al);
+    bar[i + 3] = 255;
+  }
+  extras.push(bar);
+  if (currentLUT && currentLUT.data) {
+    const l = currentLUT.data, op = new Uint8ClampedArray(l.length);
+    for (let i = 0; i < l.length; i += 4) { op[i] = l[i]; op[i + 1] = l[i + 1]; op[i + 2] = l[i + 2]; op[i + 3] = 255; }
+    extras.push(op);
+  }
+  const extraLen = extras.reduce((s, e) => s + e.length, 0);
+  const reps = Math.max(1, Math.round((data.length * 0.04) / extraLen));
+  const sample = new Uint8ClampedArray(data.length + extraLen * reps);
+  sample.set(data);
+  let off = data.length;
+  for (let r = 0; r < reps; r++) for (const e of extras) { sample.set(e, off); off += e.length; }
+  return enc.quantize(sample, 256);
+}
+
+// kind: "view" (map or globe, range from the GIF card) or "box" (the box
+// contents over the box card's Months range). Frame time, Every N and
+// Size come from the GIF card either way.
+async function gifRun(kind) {
+  if (gif.busy || snap.busy || !currentDisplay || !meta) return;
+  if (state.compare) { setStatus("GIF: not available in compare mode (A − B)", true); return; }
+  if (kind === "box" && (!box.bounds || !box.rect)) return;
+  const daily = timeFreq() === "day";
+  const step = gifStride(), cap = gifMaxFrames(), streaming = gifStreams();
+  let times;
+  if (kind === "box") {
+    times = gifTimes(box.range.start, box.range.end, step);
+  } else {
+    const s = gifParseTime(el("gif-start").value, false), e = gifParseTime(el("gif-end").value, true);
+    if (!s || !e) { setStatus(`GIF: type times as ${daily ? "YYYY-MM-DD" : "YYYY-MM"} (or just YYYY)`, true); return; }
+    times = gifTimes(s, e, step);
+  }
+  const n = times.length;
+  if (n < 2) { setStatus("GIF: the range needs at least 2 frames inside the scenario", true); return; }
+  if (n > cap) {
+    setStatus(`GIF: more than ${cap} frames — shorten the ${kind === "box" ? "box's Months " : ""}range or raise Every N`, true);
+    return;
+  }
+  let enc;
+  try { enc = gifLib(); } catch (e) { setStatus(`GIF: ${e.message}`, true); return; }
+  if (playback.frames || playback.playing || playback.loading) discardPlayback();
+
+  gif.busy = true;
+  gif.abort = false;
+  snap.busy = true;
+  gifSetBusy(true);
+  const origTime = el("month-input").value;
+  const stem = snapStem().slice(0, origTime ? -(origTime.length + 1) : undefined);
+  const delay = gifDelay();
+  const maxWidth = gif.width;
+  const withWind = el("particles-toggle").checked && hasWind();
+  const isPlev = meta.variables[state.var].plev;
+  const p = { n, stream: streaming, fetched: 0, rendered: 0, tFetch: performance.now(), tRender: null, time: times[0], wind: withWind };
+  el("load-overlay").hidden = false;
+  el("load-title").textContent = `Building ${kind === "box" ? "box " : ""}GIF…`;
+  el("load-cancel").hidden = false;
+  gifProgress(p);
+
+  // one frame's field (and wind, if particles are shown), parsed to grids
+  const fetchFrame = async (t) => {
+    const f = await fetchField({ experiment: state.experiment, member: state.member, stat: state.stat, time: t });
+    f._grid = toFloat32(f.values, f.nlat, f.nlon);
+    f.values = null; // free the parsed JSON
+    let w = null;
+    if (withWind) {
+      const wp = {
+        dataset: state.dataset, experiment: state.experiment,
+        member: state.stat === "raw" ? state.member : "ensmean", time: t,
+      };
+      if (isPlev) wp.plev = state.plev;
+      w = await fetchJSON(`${API}/api/wind?${new URLSearchParams(wp)}`);
+      w._u = toFloat32(w.u, w.nlat, w.nlon);
+      w._v = toFloat32(w.v, w.nlat, w.nlon);
+      w.u = w.v = null;
+    }
+    return { f, w };
+  };
+
+  let err = null, bytes = null, frames = 0, outW = 0, outH = 0;
+  try {
+    // 1. colour scale: fixed (streamed build), or from every field (held)
+    let lut;
+    const held = [];
+    if (streaming) {
+      lut = buildLUT(state.var);
+    } else {
+      for (const t of times) {
+        if (gif.abort) throw new Error("cancelled");
+        held.push(await fetchFrame(t));
+        p.fetched++;
+        p.time = times[Math.min(p.fetched, n - 1)];
+        gifProgress(p);
+      }
+      lut = commonLUTFor(held.map((h) => h.f));
+    }
+
+    // 2. show each frame through the normal render path, snapshot, encode
+    p.tRender = performance.now();
+    p.time = times[0];
+    gifProgress(p);
+    if (kind === "box") await boxSnapBegin();
+    const encoder = enc.GIFEncoder();
+    let palette = null;
+    for (let i = 0; i < n; i++) {
+      if (gif.abort) throw new Error("cancelled");
+      const { f, w } = streaming ? await fetchFrame(times[i]) : held[i];
+      if (!streaming) held[i] = null; // free as we go
+      currentField = f;
+      currentFieldB = null;
+      currentDisplay = f;
+      currentLUT = lut;
+      if (w) currentWind = w; // particles follow this frame's wind
+      el("month-input").value = f.time;
+      const painted = gifWaitOverlay();
+      renderMeta(); // legend, contours, overlay paint, globe
+      await painted;
+      await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 60)));
+      const canvas = kind === "box"
+        ? await boxSnapCapture({ maxWidth })
+        : await snapCaptureView({ maxWidth });
+      const { data, width, height } = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+      if (!palette) palette = gifPalette(enc, data);
+      const index = enc.applyPalette(data, palette);
+      encoder.writeFrame(index, width, height, { palette, delay, repeat: 0 });
+      frames++;
+      outW = width;
+      outH = height;
+      p.rendered++;
+      p.time = times[Math.min(p.rendered, n - 1)];
+      gifProgress(p);
+      await new Promise((r) => setTimeout(r, 0)); // let the page breathe between frames
+    }
+    encoder.finish();
+    bytes = encoder.bytes();
+  } catch (e) {
+    err = e;
+  } finally {
+    await boxSnapEnd(); // no-op unless a box capture began
+    el("load-overlay").hidden = true;
+    el("load-cancel").hidden = true;
+    el("month-input").value = origTime;
+    gif.busy = false;
+    snap.busy = false;
+    gifSetBusy(false);
+    await loadField(); // back to the selected time, on its own colour scale
+  }
+  if (err) {
+    if (String(err.message || err) === "cancelled") setStatus("GIF cancelled");
+    else setStatus(`GIF failed: ${err.message || err}`, true);
+    return;
+  }
+  const blob = new Blob([bytes], { type: "image/gif" });
+  const view = kind === "box" ? "box" : globe.open ? "globe" : "map";
+  const every = step > 1 ? `_every${step}${daily ? "d" : "m"}` : "";
+  saveBlob(blob, `${stem}_${times[0]}_to_${times[n - 1]}${every}_${view}.gif`);
+  setStatus(`GIF saved: ${frames} frames, ${outW}×${outH}, ${(blob.size / 1048576).toFixed(1)} MB`);
+}
+
+el("dl-gif").addEventListener("click", () => gifToggleCard());
+el("gif-close").addEventListener("click", () => gifToggleCard(false));
+el("gif-make").addEventListener("click", () => gifRun("view"));
+for (const id of ["gif-start", "gif-end", "gif-delay", "gif-stride"]) {
+  el(id).addEventListener("change", gifRefreshNote);
+  el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+}
+el("gif-info").addEventListener("click", (e) => {
+  e.stopPropagation();
+  showInfoPopover(GIF_INFO_TEXT, e.clientX, e.clientY);
+});
+buildSeg("gif-size-seg", GIF_SIZES, String(gif.width), (v) => { gif.width = +v; });

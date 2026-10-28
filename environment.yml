@@ -1,0 +1,17 @@
+# conda env for the viewer + catalog tool
+#   conda env create -f environment.yml
+#   conda activate windy
+# conda only provides the interpreter; everything else comes from PyPI via
+# pip (the netCDF4/h5py wheels bundle their own HDF5), so this also works
+# with an old or frozen conda-forge mirror as long as it has Python 3.12 (arraylake and icechunk 2.x need it).
+name: windy
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.12,<3.14
+  - pip
+  - pip:
+      # CPU-only torch (for SPEAK's RAG service); the default index would pull the multi-GB CUDA build
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch
+      - -r requirements.txt

@@ -1,0 +1,33 @@
+{
+  "output_root": "/data/4/zappalaj/catalogs",
+  "catalogs": [
+    {
+      "id": "ecda",
+      "title": "ECDA reanalysis",
+      "description": "SPEAR c96 ECDA J11 monthly means",
+      "roots": ["/data/4/zappalaj/ecda_reanalysis/mo"],
+      "pattern": null,
+      "var_from": "auto",
+      "vars": null,
+      "frequency": null,
+      "parser": "auto",
+      "keep_going": false
+    },
+    {
+      "id": "prism",
+      "title": "PRISM daily (CONUS)",
+      "description": "PRISM v2 AN81d daily, 1/24 degree",
+      "roots": ["/data/4/zappalaj/prism/historical/day/atmos/day/r0i0p0/v2"],
+      "pattern": null,
+      "var_from": "auto",
+      "vars": null,
+      "frequency": null,
+      "parser": "auto",
+      "keep_going": false
+    }
+  ]
+}
+"pattern": null lets the tool work out the file names itself (FMS
+atmos.YYYYMM-YYYYMM.var.nc, CMIP var_table_..._YYYYMMDD-YYYYMMDD.nc, or
+anything else: variables and dates are read from inside the files).
+"frequency": null means detect (year, month, day, 12hr, 6hr, 3hr, 1hr).

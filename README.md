@@ -7,10 +7,10 @@ ensemble**, streaming data on demand from the public ArrayLake/Icechunk store
 
 **Features**: 16 monthly variables (atmosphere incl. pressure levels, ocean
 SST) · ensemble member / mean / spread / deviation statistics · A−B compare
-mode · wind particle animation · rotatable 3-D globe view · virtual stations
+mode · wind particle animation · flat grid-cell view for diagnostics · rotatable 3-D globe view · virtual stations
 with time-series extraction and merged plots · year playback · value
 filtering · unit conversion · NetCDF/CSV downloads with full source
-metadata · **SPEAK**, a rate-limited RAG chatbot
+metadata · PNG and animated GIF exports of the view or a drawn box · **SPEAK**, a rate-limited RAG chatbot
 (Gemini) that sees the on-screen selection statistics.
 
 ## Layout
@@ -36,6 +36,44 @@ pip install -r requirements.txt
 cp .env.example .env                            # fill in tokens
 python windy_viewer/server.py                   # http://localhost:8601
 ```
+
+## Adding a dataset from NetCDF files
+
+`tools/nc_catalog.py` turns any directory tree of NetCDF files into a
+catalog the viewer can serve. Nothing is copied: it writes an Icechunk
+store of *virtual* chunk references into the original files, plus a
+`catalog.json` describing what it found. Variables, grid, time axis,
+calendar and time frequency (yearly, monthly, daily, down to hourly) are
+read from the files themselves, so FMS monthly output (one month per
+file), CMIP-style daily files (decades in one file) and multi-variable
+files all work without configuration. Filenames are only used as hints.
+
+```bash
+python tools/nc_catalog.py check /data/.../prism/historical/day        # inspect, report, write nothing
+python tools/nc_catalog.py build /data/.../prism/historical/day \
+    --out /data/4/<you>/catalogs/prism --id prism --title "PRISM daily"
+python tools/nc_catalog.py update --out /data/4/<you>/catalogs/prism   # pick up new files later
+python tools/nc_catalog.py info   /data/4/<you>/catalogs/prism
+```
+
+Or list several source trees in a config (see `catalogs.example.json`,
+`python tools/nc_catalog.py example-config`) and run them all with
+`python tools/nc_catalog.py run --config catalogs.json`. Then add the
+catalog to `datasets.json`:
+
+```json
+{"id": "prism", "type": "catalog", "path": "/data/4/<you>/catalogs/prism", "title": "PRISM daily"}
+```
+
+Every file is checked first (format, grid, time axis, duplicates, gaps,
+fill values); problems are logged as WARNING (kept) or ERROR (skipped),
+and a build stops on errors unless `--keep-going`. Odd layouts:
+`--pattern` (regex with `start`/`end` date-stamp groups), `--var-from dir`
+(variable named by the parent directory), `--frequency` (force it).
+Mock trees for local testing come from `tools/make_mock_ecda.py`
+(monthly FMS) and `tools/make_mock_prism.py` (daily CMIP-style, CONUS).
+`tools/nc_catalog_legacy.py` is the original monthly-only builder, kept
+for reference.
 
 ## Run with podman
 

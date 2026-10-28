@@ -1,3 +1,4 @@
+# Requires Python >= 3.12 (arraylake, icechunk 2.x).
 # SPEAR windy viewer + SPEAK chat (FastAPI, ArrayLake/Icechunk data access)
 fastapi>=0.115
 uvicorn[standard]>=0.30
@@ -10,6 +11,10 @@ arraylake>=1.0
 python-dotenv>=1.0
 matplotlib>=3.9
 netCDF4>=1.7
+
+# Local NetCDF collections as virtual Icechunk stores (tools/nc_catalog.py)
+virtualizarr[hdf,icechunk]>=2.7
+kerchunk>=0.2.10        # NetCDF-3 (classic / 64-bit offset) parser backend
 
 # RAG service (SPEAK document retrieval) — the heavy part; the viewer runs
 # fine without it (SPEAK just loses publication citations).

@@ -11,6 +11,8 @@
      The map/globe canvases are deliberately NOT scaled (Leaflet click
      coordinates break under CSS zoom); they fill the screen either way. */
   --ui-scale: 0.8;
+  /* side panel width; the resizer sets it (remembered per browser) */
+  --panel-w: 280px;
 }
 /* short displays (compact laptops): step the chrome down so the side
    panel still fits without a scrollbar */
@@ -57,7 +59,7 @@ html, body {
   top: 12px;
   left: 12px;
   z-index: 1000;
-  width: 280px;
+  width: var(--panel-w);
   /* vh resolves against the real viewport and is then multiplied by the
      chrome zoom — divide by the scale so the rendered height is a true
      100vh minus room for the data-access box */
@@ -75,6 +77,29 @@ html, body {
   border-radius: 10px;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
 }
+/* drag strip down the panel's right edge (sticky, so it stays put when
+   the panel scrolls); the ::before is the hit area and the hover line */
+.panel-resizer {
+  position: sticky;
+  top: -14px; /* the panel's top padding: stick to its very top */
+  height: 0;
+  z-index: 5;
+}
+.panel-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: -16px; /* the panel's right padding: flush with its edge */
+  width: 9px;
+  height: 100vh;
+  cursor: col-resize;
+  border-right: 2px solid transparent;
+  transition: border-color 0.15s;
+}
+.panel-resizer:hover::before,
+body.panel-resizing .panel-resizer::before { border-right-color: var(--accent); }
+body.panel-resizing { cursor: col-resize; user-select: none; }
+body.panel-resizing .panel { transition: none; }
 .panel::-webkit-scrollbar { width: 7px; }
 .panel::-webkit-scrollbar-track { background: transparent; }
 .panel::-webkit-scrollbar-thumb {
@@ -103,6 +128,7 @@ html, body {
   margin-left: 4px;
 }
 
+.row[hidden] { display: none; }
 .row {
   display: flex;
   align-items: center;
@@ -113,7 +139,7 @@ html, body {
   color: var(--ink-2);
 }
 
-.row input[type="month"] {
+.row input[type="month"], .row input[type="date"] {
   background: #242423;
   color: var(--ink);
   border: 1px solid var(--border);
@@ -121,6 +147,11 @@ html, body {
   padding: 4px 6px;
   font: inherit;
   font-size: 14px;
+  /* explicit size: browsers without a month picker (Firefox) fall back to
+     a wide text box that would push the > button out of the panel */
+  width: 122px;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 /* segmented button groups (in-page controls — native <select> popups
@@ -130,17 +161,62 @@ html, body {
   align-items: flex-start;
   gap: 5px;
 }
-.subgroup-title {
+/* variable picker: full-width dropdown with grouped, filterable items */
+.var-dropdown { width: 100%; }
+.var-long {
   font-size: 12px;
-  font-weight: 600;
   color: var(--muted);
-  margin-top: 4px;
+  line-height: 1.3;
 }
-.plev-inline {
+#var-list { max-height: min(60vh, 420px); }
+.dd-filter {
+  position: sticky;
+  top: 0;
+  padding: 6px;
+  background: #242423;
+  border-bottom: 1px solid var(--border);
+  z-index: 1;
+}
+.dd-filter input {
   width: 100%;
-  margin: 0;
+  box-sizing: border-box;
+  background: #1b1b1a;
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 13px;
 }
-.plev-inline .dropdown { min-width: 120px; }
+.dd-header {
+  padding: 5px 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #1b1b1a;
+  background: #ecece8;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.dd-header:first-of-type { margin-top: 0; }
+.dd-header.sub {
+  margin-top: 2px;
+  padding: 4px 10px 4px 16px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #fff;
+  background: #3a3a38;
+  text-transform: none;
+  letter-spacing: 0.3px;
+  border-top: none;
+}
+.dd-header[hidden], .dd-item[hidden] { display: none; }
+.var-item { display: flex; flex-direction: column; gap: 1px; padding: 5px 10px; }
+.var-name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.var-desc { font-size: 11.5px; color: var(--muted); line-height: 1.25; }
+.dd-item.selected .var-desc { color: var(--ink-2); }
 .seg {
   display: flex;
   flex-wrap: wrap;
@@ -247,18 +323,52 @@ html, body {
 .dl-buttons {
   display: flex;
   gap: 4px;
+  width: 100%;
 }
 .dl-buttons button {
+  flex: 1 1 auto;
+  white-space: nowrap;
   background: #242423;
   color: var(--ink-2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 5px 10px;
+  padding: 5px 8px;
   font: inherit;
   font-size: 13px;
   cursor: pointer;
 }
 .dl-buttons button:hover { background: #2e2e2c; color: var(--ink); }
+.dl-buttons button:disabled { opacity: 0.45; cursor: not-allowed; }
+.dl-buttons button.active { border-color: var(--accent); color: var(--ink); }
+
+/* animated GIF settings, opened by the GIF download button */
+.gif-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 10px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.gif-card[hidden] { display: none; }
+.gif-title { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.gif-range { flex-wrap: wrap; }
+.gif-card .ts-range input[type="text"] { width: 82px; flex: 0 0 auto; } /* beats the wider .ts-range rule below */
+.gif-range label { display: flex; align-items: center; gap: 4px; }
+.gif-range .seg { width: auto; flex: 1; }
+.gif-range input[type="number"] {
+  background: #242423;
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 5px;
+  font: 12px system-ui, sans-serif;
+  width: 64px;
+}
+.gif-size-seg button { padding: 2px 8px; font-size: 11px; }
+.gif-actions { padding: 2px 0 0; }
+.box-note.over { color: #e66767; }
 
 .compare-title {
   font-size: 12px;
@@ -278,6 +388,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
 }
 .month-controls button {
   background: #242423;
@@ -293,7 +404,9 @@ html, body {
 .month-controls button:hover { background: #2e2e2c; }
 
 .row input[type="range"] {
-  flex: 1;
+  flex: 1 1 60px;
+  min-width: 0;
+  width: 100px; /* Firefox's default range width would overflow the row */
   accent-color: var(--accent);
 }
 
@@ -481,6 +594,42 @@ html, body {
   color: var(--muted);
   text-align: right;
 }
+.legend-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+/* low-key colour-scale picker: a miniature of the legend bar plus a caret */
+.cmap-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.cmap-btn canvas { width: 28px; height: 8px; border-radius: 3px; border: 1px solid var(--border); display: block; }
+.cmap-btn:hover { color: var(--ink); border-color: var(--border); background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.cmap-popover { padding: 8px 8px 6px; width: 232px; max-height: min(70vh, 560px); overflow-y: auto; }
+.cmap-title { font-size: 11px; color: var(--muted); margin: 0 0 6px 2px; letter-spacing: 0.02em; }
+.cmap-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--ink);
+  font: 12px system-ui, sans-serif;
+  padding: 3px 4px;
+  cursor: pointer;
+  text-align: left;
+}
+.cmap-row canvas { width: 64px; height: 10px; border-radius: 2px; border: 1px solid var(--border); flex: none; }
+.cmap-row:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.cmap-row.active { border-color: var(--accent); }
 
 .status {
   margin-top: 10px;
@@ -603,7 +752,8 @@ html, body {
   font-size: 12px;
   color: var(--muted);
 }
-.ts-range input[type="month"] {
+.ts-range input[type="month"],
+.ts-range input[type="text"] {
   background: #242423;
   color: var(--ink);
   border: 1px solid var(--border);
@@ -1076,7 +1226,7 @@ html, body {
 .globe-btn {
   position: fixed;
   top: 12px;
-  left: 334px; /* right of the panel, clearing its scrollbar-widened state */
+  left: calc(var(--panel-w) + 54px); /* right of the panel, clearing its scrollbar-widened state */
   z-index: 1100;
   padding: 12px 22px;
   background: color-mix(in srgb, var(--surface) 92%, transparent);
@@ -1089,7 +1239,6 @@ html, body {
 }
 .globe-btn:hover { color: var(--ink); background: #2e2e2c; border-color: var(--accent); }
 .globe-btn.active { border-color: var(--accent); color: #9cc4f2; }
-.group-hint { cursor: help; }
 .grat-labels {
   position: absolute;
   inset: 0;
@@ -1106,7 +1255,7 @@ html, body {
 .grat-box {
   position: fixed;
   top: 118px; /* under the Globe/Map and Draw-a-Box buttons */
-  left: 334px;
+  left: calc(var(--panel-w) + 54px);
   z-index: 1100;
   display: flex;
   flex-direction: column;
@@ -1130,7 +1279,7 @@ html, body {
 .globe-note {
   position: fixed;
   top: 256px;
-  left: 334px;
+  left: calc(var(--panel-w) + 54px);
   z-index: 1100;
   max-width: 190px;
   padding: 8px 12px;
@@ -1292,6 +1441,32 @@ html, body {
   padding: 2px 6px;
 }
 .chat-header-btns button:hover { color: #fff; }
+.chat-header-btns .chat-context-btn {
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 10px;
+  padding: 1px 8px;
+  margin-right: 4px;
+}
+.chat-header-btns .chat-context-btn:hover { border-color: #fff; }
+/* the "Context" view inside the conversation */
+.chat-msg.context { max-width: 100%; font-size: 12px; }
+.chat-msg.context .ctx-head { color: var(--muted); font-size: 11px; letter-spacing: 0.03em; text-transform: uppercase; margin-bottom: 6px; }
+.chat-msg.context .ctx-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
+.ctx-sec { margin: 6px 0 10px; }
+.ctx-title { font-weight: 600; color: var(--ink); margin-bottom: 4px; padding-bottom: 3px; border-bottom: 1px solid var(--border); }
+.ctx-card { margin: 4px 0; padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; }
+.ctx-row { display: grid; grid-template-columns: max-content 1fr; gap: 1px 8px; padding: 2px 0; align-items: baseline; }
+.ctx-row.sub { padding-left: 10px; }
+.ctx-row:not(:has(.ctx-label)) { display: block; color: var(--ink-2); }
+.ctx-label { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ctx-value { color: var(--ink); }
+.ctx-list { margin: 0; padding-left: 16px; color: var(--ink); }
+.ctx-list li { margin: 2px 0; }
+.ctx-block { padding: 3px 0 2px; }
+.ctx-block.sub { padding-left: 10px; }
+.ctx-block-title { display: block; margin-bottom: 2px; }
 
 .chat-messages {
   flex: 1;
@@ -1376,3 +1551,34 @@ html, body {
   cursor: pointer;
 }
 .chat-input button:disabled { opacity: 0.5; cursor: default; }
+
+/* (kept last so these override the rules above) Browsers without CSS zoom (Firefox before 126, incl. ESR 115): scale
+   the same chrome with a transform instead. Layout happens at full size
+   and is scaled visually, so the fixed offsets that assumed zoomed pixels
+   are multiplied by the scale here. */
+@supports not (zoom: 1) {
+  .panel, .grat-box, .globe-btn, .globe-note, .data-access, .ask-bubble,
+  .merge-plots, .clear-pins, .clear-box, .load-box {
+    zoom: 1;
+    transform: scale(var(--ui-scale));
+  }
+  .panel, .grat-box, .globe-btn, .globe-note { transform-origin: top left; }
+  .ask-bubble { transform-origin: top right; }
+  .data-access, .clear-box { transform-origin: bottom left; }
+  .merge-plots, .clear-pins { transform-origin: bottom right; }
+  .load-box { transform-origin: center; }
+  .play-bar { transform: translateX(-50%) scale(var(--ui-scale)); transform-origin: bottom center; }
+  .globe-hint { transform: translateX(-50%) scale(var(--ui-scale)); transform-origin: bottom center; }
+  .panel { top: calc(12px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
+  .globe-btn { top: calc(12px * var(--ui-scale)); left: calc((var(--panel-w) + 54px) * var(--ui-scale)); }
+  .globe-btn.box-btn { top: calc(64px * var(--ui-scale)); }
+  .grat-box { top: calc(118px * var(--ui-scale)); left: calc((var(--panel-w) + 54px) * var(--ui-scale)); }
+  .rotate-btn { top: calc(202px * var(--ui-scale)); }
+  .globe-note { top: calc(256px * var(--ui-scale)); left: calc((var(--panel-w) + 54px) * var(--ui-scale)); }
+  .data-access { bottom: calc(24px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
+  .clear-box { bottom: calc(92px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
+  .ask-bubble { top: calc(16px * var(--ui-scale)); right: calc(16px * var(--ui-scale)); }
+  .merge-plots { bottom: calc(76px * var(--ui-scale)); right: calc(14px * var(--ui-scale)); }
+  .clear-pins { bottom: calc(24px * var(--ui-scale)); right: calc(14px * var(--ui-scale)); }
+  .play-bar { bottom: calc(20px * var(--ui-scale)); }
+}
