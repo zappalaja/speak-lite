@@ -6,7 +6,7 @@
 <title>Climate Data Viewer</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-<link rel="stylesheet" href="style.css?v=18" />
+<link rel="stylesheet" href="style.css?v=20" />
 </head>
 <body>
 <div id="map"></div>
@@ -93,6 +93,7 @@
       <button type="button" id="box-dl-nc" title="NetCDF with full metadata">&#8595; NetCDF</button>
       <button type="button" id="box-dl-csv" title="CSV (time, lat, lon, value) with metadata header">&#8595; CSV</button>
       <button type="button" id="box-dl-png" title="PNG image of just the box contents (map view, current month)">&#8595; PNG</button>
+      <button type="button" id="box-dl-gif" title="Animated GIF of just the box contents, one frame per month (or day) over the Months range above; frame time, Every N and size follow the GIF settings under Download">&#8595; GIF</button>
     </div>
   </div>
 </div>
@@ -122,6 +123,7 @@
 </div>
 
 <div class="panel" id="panel">
+  <div class="panel-resizer" id="panel-resizer" title="Drag to make the panel wider or narrower (double-click to reset)"></div>
   <div class="panel-title"><a class="brand-link" id="brand-link" href="#" target="_blank" rel="noopener"></a> <span class="sub" id="brand-sub"></span></div>
 
   <div class="row row-col" id="dataset-row" hidden>
@@ -220,6 +222,11 @@
     <input type="range" id="opacity" min="0" max="100" value="100" />
   </label>
 
+  <label class="row">
+    <span>Grid cells <span class="info-i" id="cells-info">&#9432;</span></span>
+    <input type="checkbox" id="cells-toggle" />
+  </label>
+
   <label class="row" id="wind-row">
     <span>Wind animation</span>
     <input type="checkbox" id="particles-toggle" checked />
@@ -254,12 +261,38 @@
     <div class="contour-summary" id="contour-summary"></div>
   </div>
 
-  <div class="row">
+  <div class="row row-col">
     <span>Download</span>
     <div class="dl-buttons">
       <button type="button" id="dl-nc" title="NetCDF with full metadata">&#8595; NetCDF</button>
       <button type="button" id="dl-csv" title="CSV with metadata header">&#8595; CSV</button>
       <button type="button" id="dl-png" title="PNG image of the current map or globe view — no panels; includes whatever labels, lat/lon lines, contours and stations are shown">&#8595; PNG</button>
+      <button type="button" id="dl-gif" title="Animated GIF of the map or globe view stepping through a time range — pick the range, frame time and size below">&#8595; GIF</button>
+    </div>
+  </div>
+
+  <div class="gif-card" id="gif-card" hidden>
+    <div class="gif-title">Animated GIF <span class="info-i" id="gif-info">&#9432;</span></div>
+    <div class="ts-range gif-range">
+      <span>From</span>
+      <input type="text" inputmode="numeric" placeholder="YYYY-MM" maxlength="10" id="gif-start" />
+      <span>to</span>
+      <input type="text" inputmode="numeric" placeholder="YYYY-MM" maxlength="10" id="gif-end" />
+    </div>
+    <div class="ts-range gif-range">
+      <label title="How long each time step shows, in milliseconds">Frame <input type="number" id="gif-delay" min="50" max="10000" step="50" value="500" /> ms</label>
+    </div>
+    <div class="ts-range gif-range">
+      <label title="Use every Nth time step: 12 on monthly data gives one frame per year, 7 on daily data one per week">Every <input type="number" id="gif-stride" min="1" max="366" step="1" value="1" /> <span id="gif-stride-unit">months</span></label>
+    </div>
+    <div class="ts-range gif-range">
+      <span title="Caps the frame width; smaller frames make a much smaller file">Size</span>
+      <div class="seg gif-size-seg" id="gif-size-seg"></div>
+    </div>
+    <div class="box-note gif-note" id="gif-note"></div>
+    <div class="ts-card-actions box-actions gif-actions">
+      <button type="button" id="gif-make" title="Step through every time in the range and save the frames as one animated GIF">&#8595; Create GIF</button>
+      <button type="button" id="gif-close">Close</button>
     </div>
   </div>
 
@@ -290,6 +323,11 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="config.js"></script>
-<script src="app.js?v=60"></script>
+<script type="module">
+  // GIF encoder for the animated export (vendored; see vendor/gifenc.LICENSE.md)
+  import { GIFEncoder, quantize, applyPalette } from "./vendor/gifenc.esm.js";
+  window.GIFENC = { GIFEncoder, quantize, applyPalette };
+</script>
+<script src="app.js?v=66"></script>
 </body>
 </html>

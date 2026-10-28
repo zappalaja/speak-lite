@@ -564,6 +564,7 @@ const URL_VIEW = (() => {
   if (str("time") && /^\d{4}-\d{2}$/.test(str("time"))) out.timeA = str("time");
   if (str("time_b") && /^\d{4}-\d{2}$/.test(str("time_b"))) out.timeB = str("time_b");
   if (q.has("compare")) out.compare = q.get("compare") === "1";
+  if (q.has("cells")) out.cells = q.get("cells") === "1";
   if (str("exp_b") || str("member_b") || str("stat_b")) {
     out.b = {};
     if (str("exp_b")) out.b.experiment = str("exp_b");
@@ -773,6 +774,7 @@ const state = {
   member: "r1i1p1f1",
   stat: "raw",   // raw | mean | spread | anom
   compare: false,
+  cells: false,  // paint flat grid cells (nearest centre) instead of blending between centres
   plev: 500,
   b: { experiment: "scenarioSSP5-85", member: "r2i1p1f1", stat: "raw" },
   units: {
@@ -802,7 +804,7 @@ const SAVED = (() => {
   // defaults (so it looks the same for everyone), not this browser's
   // remembered selection. Only display preferences carry over.
   const base = stored || {};
-  const merged = { opacity: base.opacity, particles: base.particles, grat: base.grat,
+  const merged = { opacity: base.opacity, particles: base.particles, cells: base.cells, grat: base.grat,
                    contours: base.contours, units: { ...(base.units || {}) }, cmap: base.cmap, ...URL_VIEW };
   if (URL_VIEW.cmap) {
     const b = (base.cmap && typeof base.cmap.seq === "object") ? base.cmap : { seq: {}, div: {} };
@@ -827,6 +829,7 @@ function syncUrl() {
   if (unit) q.set("unit", unit);
   if (cmapOverride("seq")) q.set("cmap", cmapOverride("seq"));
   if (cmapOverride("div")) q.set("cmapd", cmapOverride("div"));
+  if (state.cells) q.set("cells", "1");
   if (state.compare) {
     q.set("compare", "1");
     if (Object.keys(meta.experiments).length > 1) q.set("exp_b", state.b.experiment);
@@ -879,6 +882,7 @@ function saveState() {
       timeB: el("month-input-b").value,
       opacity: el("opacity").value,
       particles: el("particles-toggle").checked,
+      cells: state.cells,
       pins: (typeof pinnedPoints !== "undefined" ? pinnedPoints : []).map((p) => ({
         lat: p.latlng.lat,
         lng: p.latlng.lng,
@@ -1097,6 +1101,35 @@ function sampleGrid(g, arr, lat, lon) {
   );
 }
 
+// Nearest cell index for a longitude / latitude, or -1 outside the grid.
+// `extend` admits the half cell beyond the outermost centres (so edge
+// cells of a regional grid paint at full width); off, the domain is the
+// same as the bilinear sampler's.
+function gridXNearest(g, lon, extend = true) {
+  const e = extend ? 0.5 : 0;
+  let x = (lon - g.lon0) / g.dlon;
+  if (g.wrap === false) {
+    if (x < -e) x = (lon + 360 - g.lon0) / g.dlon;
+    else if (x > g.nlon - 1 + e) x = (lon - 360 - g.lon0) / g.dlon;
+    return x < -e || x > g.nlon - 1 + e ? -1 : Math.max(0, Math.min(g.nlon - 1, Math.round(x)));
+  }
+  return Math.round(((x % g.nlon) + g.nlon) % g.nlon) % g.nlon;
+}
+function gridYNearest(g, lat, extend = true) {
+  const e = extend ? 0.5 : 0;
+  const y = (lat - g.lat0) / g.dlat;
+  return y < -e || y > g.nlat - 1 + e ? -1 : Math.max(0, Math.min(g.nlat - 1, Math.round(y)));
+}
+// Flat-cell sample: the value of the nearest cell centre, no blending.
+function sampleGridNearest(g, arr, lat, lon, extend = true) {
+  const j = gridXNearest(g, lon, extend);
+  if (j < 0) return null;
+  const i = gridYNearest(g, lat, extend);
+  if (i < 0) return null;
+  const v = arr[i * g.nlon + j];
+  return v !== v ? null : v;
+}
+
 function nearestCell(g, lat, lon) {
   let i = Math.round((lat - g.lat0) / g.dlat);
   i = Math.max(0, Math.min(g.nlat - 1, i));
@@ -1126,6 +1159,45 @@ function renderFieldToURL(d, lut, filter) {
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(W, H);
   const px = img.data;
+  const yMax = Math.log(Math.tan(Math.PI / 4 + (MERC_LAT * Math.PI) / 360));
+  // row 0 = top of image = +85.05; invert Mercator to get latitude
+  const rowLat = (r) => {
+    const my = yMax - (2 * yMax * r) / (H - 1);
+    return (2 * Math.atan(Math.exp(my)) - Math.PI / 2) * (180 / Math.PI);
+  };
+
+  if (state.cells) {
+    // "Grid cells": every pixel takes the value of the nearest cell
+    // centre, so each cell paints as a flat block at the model's true
+    // resolution (edge cells of regional grids at their full width).
+    const cn = new Int32Array(W);
+    for (let c = 0; c < W; c++) cn[c] = gridXNearest(d, -180 + (360 * c) / (W - 1));
+    for (let r = 0; r < H; r++) {
+      const i = gridYNearest(d, rowLat(r));
+      if (i < 0) continue; // leave the row transparent
+      const row = i * nlon;
+      let k = r * W * 4;
+      for (let c = 0; c < W; c++, k += 4) {
+        if (cn[c] < 0) continue;
+        const v = grid[row + cn[c]];
+        if (v !== v) continue;
+        if (fLo != null && v < fLo) continue; // filtered out -> transparent
+        if (fHi != null && v > fHi) continue;
+        let idx = ((v - lut.min) * lut.scale) | 0;
+        if (idx < 0) idx = 0;
+        else if (idx > lut.last) idx = lut.last;
+        const li = idx * 4;
+        px[k] = lut.data[li];
+        px[k + 1] = lut.data[li + 1];
+        px[k + 2] = lut.data[li + 2];
+        px[k + 3] = lut.data[li + 3];
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => resolve(blob ? URL.createObjectURL(blob) : null), "image/png");
+    });
+  }
 
   // Column -> grid x mapping is independent of the row; precompute it.
   const cx0 = new Int32Array(W), cx1 = new Int32Array(W);
@@ -1138,12 +1210,8 @@ function renderFieldToURL(d, lut, filter) {
     ctx_[c] = x < 0 ? 0 : x - cx0[c];
   }
 
-  const yMax = Math.log(Math.tan(Math.PI / 4 + (MERC_LAT * Math.PI) / 360));
   for (let r = 0; r < H; r++) {
-    // row 0 = top of image = +85.05; invert Mercator to get latitude
-    const my = yMax - (2 * yMax * r) / (H - 1);
-    const lat = (2 * Math.atan(Math.exp(my)) - Math.PI / 2) * (180 / Math.PI);
-    const y = (lat - lat0) / dlat;
+    const y = (rowLat(r) - lat0) / dlat;
     if (y < 0 || y > nlat - 1) continue; // leave the row transparent
     const y0 = y | 0;
     const y1 = Math.min(y0 + 1, nlat - 1);
@@ -1186,26 +1254,121 @@ function renderFieldToURL(d, lut, filter) {
 }
 
 function applyOverlayUrl(url) {
-  const opacity = el("opacity").value / 100;
   if (overlays.length) {
-    for (const o of overlays) {
-      o.setUrl(url);
-      o.setOpacity(opacity);
-    }
+    for (const o of overlays) o.setUrl(url);
   } else {
     overlays = WORLD_COPIES.map((offset) =>
       L.imageOverlay(url, [[-MERC_LAT, -180 + offset], [MERC_LAT, 180 + offset]], {
-        opacity,
+        opacity: el("opacity").value / 100,
         interactive: false,
       }).addTo(map)
     );
   }
+  applyOverlayOpacity();
 }
+
+// The Opacity slider drives the image overlay, or the grid-cells canvas
+// when that is showing the field instead (the image is then hidden).
+function applyOverlayOpacity() {
+  const v = el("opacity").value / 100;
+  const hide = cellsActive();
+  for (const o of overlays) o.setOpacity(hide ? 0 : v);
+  if (cellsLayer.canvas) cellsLayer.canvas.style.opacity = v;
+}
+
+// ---- "Grid cells" canvas. The image overlay is a fixed 1600-px raster
+// that the browser smooths when it upscales, so even nearest-painted cells
+// blur into each other at high zoom. In cells mode the field is instead
+// resampled per SCREEN pixel (nearest cell centre) onto a canvas pinned
+// to the viewport and redrawn after every move, zoom or repaint: cell
+// edges are exact at any zoom. The image overlay is hidden meanwhile but
+// still painted, so switching back is instant.
+const cellsLayer = { canvas: null, ctx: null };
+
+function cellsActive() {
+  return state.cells && !!currentDisplay && !!currentLUT && currentDisplay._grid != null;
+}
+
+function initCellsCanvas() {
+  map.createPane("cells").style.zIndex = 405; // above the image overlays (400), below borders (430)
+  map.getPane("cells").style.pointerEvents = "none";
+  const canvas = document.createElement("canvas");
+  canvas.className = "particle-canvas leaflet-zoom-animated"; // same pinning rules as the particle canvas
+  canvas.style.display = "none";
+  map.getPane("cells").appendChild(canvas);
+  cellsLayer.canvas = canvas;
+  cellsLayer.ctx = canvas.getContext("2d");
+  map.on("moveend zoomend resize", cellsDraw);
+  // follow the zoom animation like an image overlay does, then redraw crisp
+  map.on("zoomanim", (e) => {
+    if (canvas.style.display === "none") return;
+    const nw = map._latLngToNewLayerPoint(map.containerPointToLatLng([0, 0]), e.zoom, e.center);
+    L.DomUtil.setTransform(canvas, nw, map.getZoomScale(e.zoom));
+  });
+}
+
+function cellsDraw() {
+  const canvas = cellsLayer.canvas;
+  if (!canvas) return;
+  if (!cellsActive()) { canvas.style.display = "none"; return; }
+  canvas.style.display = "";
+  const size = map.getSize();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = Math.round(size.x * dpr), H = Math.round(size.y * dpr);
+  if (canvas.width !== W || canvas.height !== H) {
+    canvas.width = W;
+    canvas.height = H;
+    canvas.style.width = `${size.x}px`;
+    canvas.style.height = `${size.y}px`;
+  }
+  L.DomUtil.setPosition(canvas, map.containerPointToLayerPoint([0, 0])); // pin to the viewport
+  const d = currentDisplay, grid = d._grid, nlon = d.nlon;
+  const lut = effectiveLUT();
+  const fLo = state.filter ? state.filter.lo : null, fHi = state.filter ? state.filter.hi : null;
+  // one projection per pixel column and row (Mercator is separable)
+  const col = new Int32Array(W), row = new Int32Array(H);
+  for (let x = 0; x < W; x++) col[x] = gridXNearest(d, map.containerPointToLatLng([(x + 0.5) / dpr, 0]).lng);
+  for (let y = 0; y < H; y++) row[y] = gridYNearest(d, map.containerPointToLatLng([0, (y + 0.5) / dpr]).lat);
+  const img = cellsLayer.ctx.createImageData(W, H);
+  const px = img.data;
+  for (let y = 0; y < H; y++) {
+    const i = row[y];
+    if (i < 0) continue;
+    const base = i * nlon;
+    let k = y * W * 4;
+    for (let x = 0; x < W; x++, k += 4) {
+      const j = col[x];
+      if (j < 0) continue;
+      const v = grid[base + j];
+      if (v !== v) continue;
+      if (fLo != null && v < fLo) continue;
+      if (fHi != null && v > fHi) continue;
+      let idx = ((v - lut.min) * lut.scale) | 0;
+      if (idx < 0) idx = 0;
+      else if (idx > lut.last) idx = lut.last;
+      const li = idx * 4;
+      px[k] = lut.data[li];
+      px[k + 1] = lut.data[li + 1];
+      px[k + 2] = lut.data[li + 2];
+      px[k + 3] = lut.data[li + 3];
+    }
+  }
+  cellsLayer.ctx.putImageData(img, 0, 0);
+}
+
+const CELLS_INFO_TEXT =
+  "Paint every grid cell as a flat block of its own value instead of " +
+  "blending smoothly between cell centres. Shows the model's true " +
+  "resolution, which is handy for diagnostic checks. Applies to the map, " +
+  "the globe, year playback and the PNG/GIF exports; hover readouts always " +
+  "give the cell value either way. Cell edges are exact at every zoom. Remembered, and carried in shared links.";
 
 const painted = { d: null, lut: null }; // what the overlay currently shows
 function renderOverlay(d, lut, seq, filter) {
   painted.d = d;
   painted.lut = lut;
+  cellsDraw(); // the grid-cells canvas (if on) shows the new field at once
+  applyOverlayOpacity();
   renderFieldToURL(d, lut, filter).then((url) => {
     if (!url) return;
     if (seq !== loadSeq) {
@@ -1872,6 +2035,7 @@ async function loadField() {
   const seq = ++loadSeq;
   saveState();
   boxRefresh(); // the box card mirrors the selection it will extract
+  gifRefreshNote(); // and the GIF card's frame count
   const selA = {
     experiment: state.experiment,
     member: state.member,
@@ -2314,13 +2478,59 @@ function memberBtnState(btn, stat, member) {
 // reflows. Overlay scrollbars (some platforms) measure 0 — no change.
 function updatePanelScrollPad() {
   const p = el("panel");
-  p.style.width = ""; // reset to the base 280px before measuring
+  p.style.width = ""; // reset to the base --panel-w before measuring
   if (p.scrollHeight > p.clientHeight + 1) {
     const sw = p.offsetWidth - p.clientWidth - 2; // 2 = left+right borders
-    if (sw > 0) p.style.width = `${280 + sw}px`;
+    if (sw > 0) p.style.width = `${panelWidth + sw}px`;
   }
 }
 window.addEventListener("resize", updatePanelScrollPad);
+
+// Resizable panel: drag the strip down its right edge (double-click
+// resets). The width lives in the --panel-w CSS variable, which the
+// Globe / Draw-a-Box buttons and the lat/lon box also offset from, and is
+// remembered per browser.
+const PANEL_W = { min: 240, max: 640, def: 280 };
+let panelWidth = PANEL_W.def;
+try {
+  const v = +localStorage.getItem("panelWidth");
+  if (v >= PANEL_W.min && v <= PANEL_W.max) panelWidth = v;
+} catch { /* storage unavailable: keep the default */ }
+
+function applyPanelWidth(w, remember) {
+  panelWidth = Math.round(Math.min(PANEL_W.max, Math.max(PANEL_W.min, w)));
+  document.documentElement.style.setProperty("--panel-w", `${panelWidth}px`);
+  updatePanelScrollPad();
+  if (remember) { try { localStorage.setItem("panelWidth", String(panelWidth)); } catch { /* ignore */ } }
+}
+
+(() => {
+  const grip = el("panel-resizer");
+  // pointer coordinates are viewport px; the panel is laid out in
+  // --ui-scale-zoomed px, so divide the drag distance by the zoom
+  const uiScale = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ui-scale")) || 1;
+  grip.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    grip.setPointerCapture(e.pointerId);
+    const startX = e.clientX, startW = panelWidth, k = uiScale();
+    document.body.classList.add("panel-resizing");
+    const move = (ev) => applyPanelWidth(startW + (ev.clientX - startX) / k, false);
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+      document.body.classList.remove("panel-resizing");
+      applyPanelWidth(panelWidth, true);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
+  });
+  grip.addEventListener("dblclick", () => applyPanelWidth(PANEL_W.def, true));
+  applyPanelWidth(panelWidth, false);
+})();
 
 function updateControlStates() {
   memberBtnState(el("member-btn"), state.stat, state.member);
@@ -2695,6 +2905,8 @@ async function init() {
   applyExperimentRange("month-input-b", state.b.experiment);
   if (SAVED && SAVED.opacity != null) el("opacity").value = SAVED.opacity;
   if (SAVED && SAVED.particles != null) el("particles-toggle").checked = SAVED.particles;
+  if (SAVED && SAVED.cells != null) state.cells = !!SAVED.cells;
+  el("cells-toggle").checked = state.cells;
   el("compare-toggle").checked = state.compare;
   if (SAVED && SAVED.contours) contoursRestore(SAVED.contours);
   contoursInitUI();
@@ -2760,9 +2972,22 @@ async function init() {
     loadField();
   });
   el("opacity").addEventListener("input", () => {
-    for (const o of overlays) o.setOpacity(el("opacity").value / 100);
+    applyOverlayOpacity();
     saveState();
   });
+  el("cells-toggle").addEventListener("change", (e) => {
+    state.cells = e.target.checked;
+    saveState();
+    if (playback.frames || playback.playing) discardPlayback(); // its frames were painted the old way
+    painted.d = null; // force the overlay repaint
+    renderMeta();     // map overlay, and the globe if open
+  });
+  el("cells-info").addEventListener("click", (e) => {
+    e.preventDefault(); // inside the toggle's <label>: don't flip the checkbox
+    e.stopPropagation();
+    showInfoPopover(CELLS_INFO_TEXT, e.clientX, e.clientY);
+  });
+  el("cells-info").title = CELLS_INFO_TEXT;
   const download = (format) => {
     const params = new URLSearchParams({
       format,
@@ -2812,6 +3037,7 @@ async function init() {
   }
   initFilterControls();
   initParticleCanvas();
+  initCellsCanvas();
   loadBorders();
   addGeoLabels();
   addCountryLabels();
@@ -3204,6 +3430,7 @@ function stepPlayback() {
   currentField = fr.field;
   currentDisplay = fr.field;
   if (fr.wind) currentWind = fr.wind;
+  cellsDraw(); // grid-cells canvas, if on
   el("month-input").value = fr.field.time;
   [...el("play-timeline").children].forEach((c, i) =>
     c.classList.toggle("active", i === playback.idx)
@@ -3215,6 +3442,39 @@ function stepPlayback() {
     `(${playback.idx + 1}/${playback.frames.length})`
   );
   refreshReadout();
+}
+
+// One colour scale for a set of frames (year playback, GIF export) so the
+// legend and colours don't flicker as auto-scaled fields rescale per time
+// step: dynamic ranges span the 2nd–98th percentiles of every frame; fixed
+// variable scales are used as-is. Sets f._dyn on each field for renderMeta.
+function commonLUTFor(fields) {
+  const cfg = varConfigFor(state.var);
+  const statDyn = fields[0].stat === "anom" ? "div" : fields[0].stat === "spread" ? "seq" : null;
+  const dynMode = statDyn || cfg.dynamic || null;
+  if (dynMode === "div") {
+    let L = 0;
+    for (const f of fields) {
+      const [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
+      L = Math.max(L, Math.abs(lo), Math.abs(hi));
+    }
+    L = niceLimit(L);
+    for (const f of fields) f._dyn = { min: -L, max: L, limit: L, div: true };
+    return makeLUT(-L, L, (v, out) => diffColor(v, L, out));
+  }
+  if (dynMode === "seq") {
+    let lo = Infinity, hi = -Infinity;
+    for (const f of fields) {
+      const [a, b] = samplePercentiles(f._grid, 0.02, 0.98);
+      lo = Math.min(lo, a);
+      hi = Math.max(hi, b);
+    }
+    if (!(hi > lo)) hi = lo + 1;
+    const ramp = cmapOverride("seq") || (fields[0].stat === "spread" ? "plasma" : cfg.ramp);
+    for (const f of fields) f._dyn = { min: lo, max: hi, ramp };
+    return makeLUT(lo, hi, (v, out) => rampColor(ramp, (v - lo) / (hi - lo), 0.88, out));
+  }
+  return buildLUT(state.var);
 }
 
 async function startPlayback(resume) {
@@ -3279,35 +3539,7 @@ async function startPlayback(resume) {
         bump();
       }
     }
-    // One shared color scale for the whole year so the legend/colors don't
-    // flicker as auto-scaled fields rescale per month.
-    const cfg = varConfigFor(state.var);
-    let lut;
-    const statDyn = fields[0].stat === "anom" ? "div" : fields[0].stat === "spread" ? "seq" : null;
-    const dynMode = statDyn || cfg.dynamic || null;
-    if (dynMode === "div") {
-      let L = 0;
-      for (const f of fields) {
-        const [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
-        L = Math.max(L, Math.abs(lo), Math.abs(hi));
-      }
-      L = niceLimit(L);
-      lut = makeLUT(-L, L, (v, out) => diffColor(v, L, out));
-      for (const f of fields) f._dyn = { min: -L, max: L, limit: L, div: true };
-    } else if (dynMode === "seq") {
-      let lo = Infinity, hi = -Infinity;
-      for (const f of fields) {
-        const [a, b2] = samplePercentiles(f._grid, 0.02, 0.98);
-        lo = Math.min(lo, a);
-        hi = Math.max(hi, b2);
-      }
-      if (!(hi > lo)) hi = lo + 1;
-      const ramp = fields[0].stat === "spread" ? "plasma" : cfg.ramp;
-      lut = makeLUT(lo, hi, (v, out) => rampColor(ramp, (v - lo) / (hi - lo), 0.88, out));
-      for (const f of fields) f._dyn = { min: lo, max: hi, ramp };
-    } else {
-      lut = buildLUT(state.var);
-    }
+    const lut = commonLUTFor(fields); // one scale for the whole year
     currentLUT = lut; // globe + re-renders use the common year scale
     el("load-title").textContent = "Rendering frames…";
     playback.frames = [];
@@ -3373,6 +3605,7 @@ async function globeLoadGeo() {
 
 function globeRender(fast) {
   if (!globe.open || !currentDisplay || !currentLUT) return;
+  const nearest = state.cells; // flat grid cells instead of bilinear blending
   const canvas = el("globe-canvas");
   // fast may be a number (explicit render scale) or a boolean (drag preview)
   const scale = typeof fast === "number" ? fast
@@ -3446,14 +3679,17 @@ function globeRender(fast) {
           if (xw < 0) xw += period;
           else if (xw > nlon - 1) xw -= period;
         }
-        if (r0 >= 0 && xw >= 0 && xw <= nlon - 1) {
+        // global grids: the last column spans up to (not including) the
+        // wrap-around, x in [nlon-1, nlon); excluding it left a seam of
+        // missing data at the grid's edge meridian while auto-rotating
+        if (r0 >= 0 && xw >= 0 && (wrap ? xw < nlon : xw <= nlon - 1)) {
           const xi = xw | 0;
           const tx = xw - xi;
           const xj = wrap ? (xi + 1 === nlon ? 0 : xi + 1) : Math.min(xi + 1, nlon - 1);
           const r1 = r0 + nlon < total ? r0 + nlon : r0;
           const ty = pTy[k1];
           const v00 = grid[r0 + xi], v10 = grid[r0 + xj], v01 = grid[r1 + xi], v11 = grid[r1 + xj];
-          if (v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) {
+          if (nearest || v00 !== v00 || v10 !== v10 || v01 !== v01 || v11 !== v11) {
             const vn = grid[(ty > 0.5 ? r1 : r0) + (tx > 0.5 ? xj : xi)];
             v = vn !== vn ? null : vn;
           } else {
@@ -3470,7 +3706,9 @@ function globeRender(fast) {
         const lon = lon0 + off;
         // base sphere tone with limb shading; field color composited on top
         shade = 0.7 + 0.3 * cosc;
-        v = sampleGrid(d, grid, lat, lon);
+        // (no half-cell extension here: the per-pixel cache above only
+        // covers the bilinear domain, and both passes must agree)
+        v = nearest ? sampleGridNearest(d, grid, lat, lon, false) : sampleGrid(d, grid, lat, lon);
         if (build) {
           const gy = (lat - d.lat0) / d.dlat;
           const inGrid = gy >= 0 && gy <= d.nlat - 1;
@@ -4273,7 +4511,9 @@ async function tsCancel() {
 }
 
 el("load-cancel").addEventListener("click", () => {
-  if (typeof playback !== "undefined" && playback.loading) {
+  if (typeof gif !== "undefined" && gif.busy) {
+    gif.abort = true; // the frame loop notices and aborts
+  } else if (typeof playback !== "undefined" && playback.loading) {
     playback.abort = true; // the preload loop notices and aborts
   } else if (box.pending) {
     boxCancel();
@@ -4705,6 +4945,7 @@ const box = {
   range: { start: "", end: "" },
   job: null, jobSig: null,  // last completed extraction and the parameters it used
   pending: null,            // {job, fmt, sig} while an extraction runs
+  snapCtx: null,            // map view to restore after a box PNG/GIF snapshot
   pollTimer: null,
   cellsTimer: null,
   cells: null,              // {nlat, nlon, cells} for the current box on the current grid
@@ -5140,6 +5381,7 @@ function boxUpdateSize() {
   out.classList.toggle("over", over);
   for (const id of ["box-dl-nc", "box-dl-csv"]) el(id).disabled = over || !!box.pending;
   el("box-dl-png").disabled = !!box.pending || !!snap.busy;
+  el("box-dl-gif").disabled = !!box.pending || !!snap.busy || state.compare;
   boxRenderGrid();
 }
 
@@ -5358,6 +5600,7 @@ el("box-card-close").addEventListener("click", boxClear);
 el("box-dl-nc").addEventListener("click", () => boxDownload("nc"));
 el("box-dl-csv").addEventListener("click", () => boxDownload("csv"));
 el("box-dl-png").addEventListener("click", () => boxDownloadPNG());
+el("box-dl-gif").addEventListener("click", () => gifRun("box"));
 for (const input of document.querySelectorAll(".box-corner input[data-edge]")) {
   input.addEventListener("change", () => boxCornerChanged(input));
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
@@ -6019,11 +6262,11 @@ async function snapSVGImage(svgEl, w, h) {
 }
 
 // The flat map: everything inside #map except the Leaflet controls.
-async function snapshotMap() {
+async function snapshotMap(opts = {}) {
   const container = el("map");
   const rect = container.getBoundingClientRect();
   const W = Math.round(rect.width), H = Math.round(rect.height);
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = opts.dpr || Math.min(window.devicePixelRatio || 1, 2);
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(W * dpr);
   canvas.height = Math.round(H * dpr);
@@ -6077,9 +6320,9 @@ async function snapshotMap() {
 }
 
 // The globe: its two canvases plus the station cards on top.
-async function snapshotGlobe() {
+async function snapshotGlobe(opts = {}) {
   const W = window.innerWidth, H = window.innerHeight;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = opts.dpr || Math.min(window.devicePixelRatio || 1, 2);
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(W * dpr);
   canvas.height = Math.round(H * dpr);
@@ -6147,11 +6390,18 @@ function snapTitle() {
 }
 
 // shot: canvas at device resolution covering imgW×imgH CSS px.
+// opts.uiScale enlarges the margins, text and ticks (used when the shot is
+// a downscaled GIF frame, so the frame furniture stays its usual size).
+function snapFont(weight, px, k) {
+  return `${weight === 400 ? "" : `${weight} `}${px * k}px system-ui, -apple-system, 'Segoe UI', sans-serif`;
+}
+
 function snapFrame(shot, imgW, imgH, opts = {}) {
   const dpr = shot.width / imgW;
+  const k = opts.uiScale || 1;
   const axes = opts.axes;
   const legend = opts.legend;
-  const mL = axes ? 84 : 24, mB = axes ? 64 : 24, mT = opts.title ? 44 : 24, mR = legend ? 116 : 24;
+  const mL = (axes ? 84 : 24) * k, mB = (axes ? 64 : 24) * k, mT = (opts.title ? 44 : 24) * k, mR = (legend ? 116 : 24) * k;
   const W = imgW + mL + mR, H = imgH + mT + mB;
   const out = document.createElement("canvas");
   out.width = Math.round(W * dpr);
@@ -6162,22 +6412,22 @@ function snapFrame(shot, imgW, imgH, opts = {}) {
   ctx.fillRect(0, 0, W, H);
   ctx.drawImage(shot, mL, mT, imgW, imgH);
   ctx.strokeStyle = "#2a2a2a";
-  ctx.lineWidth = 1;
+  ctx.lineWidth = k;
   ctx.strokeRect(mL + 0.5, mT + 0.5, imgW - 1, imgH - 1);
 
   ctx.fillStyle = "#1a1a1a";
   ctx.textBaseline = "alphabetic";
   if (opts.title) {
-    ctx.font = "600 15px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.font = snapFont(600, 15, k);
     ctx.textAlign = "left";
     let title = opts.title;
     while (ctx.measureText(title).width > W - mL - mR && title.length > 8) title = title.slice(0, -2).trimEnd() + "…";
-    ctx.fillText(title, mL, mT - 16);
+    ctx.fillText(title, mL, mT - 16 * k);
   }
   if (axes) {
-    ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.font = snapFont(400, 12, k);
     ctx.strokeStyle = "#2a2a2a";
-    const tick = 6;
+    const tick = 6 * k;
     // longitudes along the bottom (ticks mirrored on top)
     ctx.textAlign = "center";
     for (const t of axes.lon) {
@@ -6186,7 +6436,7 @@ function snapFrame(shot, imgW, imgH, opts = {}) {
       ctx.moveTo(x, mT + imgH); ctx.lineTo(x, mT + imgH + tick);
       ctx.moveTo(x, mT); ctx.lineTo(x, mT - tick);
       ctx.stroke();
-      ctx.fillText(t.label, x, mT + imgH + tick + 15);
+      ctx.fillText(t.label, x, mT + imgH + tick + 15 * k);
     }
     // latitudes down the left (ticks mirrored on the right)
     ctx.textAlign = "right";
@@ -6196,63 +6446,63 @@ function snapFrame(shot, imgW, imgH, opts = {}) {
       ctx.moveTo(mL, y); ctx.lineTo(mL - tick, y);
       ctx.moveTo(mL + imgW, y); ctx.lineTo(mL + imgW + tick, y);
       ctx.stroke();
-      ctx.fillText(t.label, mL - tick - 5, y + 4);
+      ctx.fillText(t.label, mL - tick - 5 * k, y + 4 * k);
     }
     // axis titles
-    ctx.font = "600 13px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.font = snapFont(600, 13, k);
     ctx.textAlign = "center";
-    ctx.fillText("Longitude", mL + imgW / 2, mT + imgH + mB - 12);
+    ctx.fillText("Longitude", mL + imgW / 2, mT + imgH + mB - 12 * k);
     ctx.save();
-    ctx.translate(16, mT + imgH / 2);
+    ctx.translate(16 * k, mT + imgH / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.fillText("Latitude", 0, 0);
     ctx.restore();
   }
-  if (legend) snapColorbar(ctx, legend, mL + imgW + 30, mT, imgH);
+  if (legend) snapColorbar(ctx, legend, mL + imgW + 30 * k, mT, imgH, k);
   return out;
 }
 
 // Vertical colour bar in the export's right margin: a copy of the on-screen
 // legend (so banding and the chosen colour scale match the map), composited
 // over white, with its tick labels and units.
-function snapColorbar(ctx, legend, x, top, imgH) {
+function snapColorbar(ctx, legend, x, top, imgH, k = 1) {
   const src = el("legend-canvas");
   const sctx = src.getContext("2d");
   const px = sctx.getImageData(0, 0, src.width, 1).data; // one row is enough: columns are uniform
-  const barW = 16, barH = Math.max(120, Math.min(Math.round(imgH * 0.6), 320));
+  const barW = 16 * k, barH = Math.max(120 * k, Math.min(Math.round(imgH * 0.6), 320 * k));
   const y0 = top + Math.round((imgH - barH) / 2);
   for (let y = 0; y < barH; y++) {
     const c = Math.round(((barH - 1 - y) / (barH - 1)) * (src.width - 1));
-    const k = c * 4, a = px[k + 3] / 255;
-    const r = Math.round(px[k] * a + 255 * (1 - a));
-    const g = Math.round(px[k + 1] * a + 255 * (1 - a));
-    const b = Math.round(px[k + 2] * a + 255 * (1 - a));
+    const i = c * 4, a = px[i + 3] / 255;
+    const r = Math.round(px[i] * a + 255 * (1 - a));
+    const g = Math.round(px[i + 1] * a + 255 * (1 - a));
+    const b = Math.round(px[i + 2] * a + 255 * (1 - a));
     ctx.fillStyle = `rgb(${r},${g},${b})`;
     ctx.fillRect(x, y0 + y, barW, 1);
   }
   ctx.strokeStyle = "#2a2a2a";
-  ctx.lineWidth = 1;
+  ctx.lineWidth = k;
   ctx.strokeRect(x + 0.5, y0 + 0.5, barW - 1, barH - 1);
   ctx.fillStyle = "#1a1a1a";
-  ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.font = snapFont(400, 12, k);
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   const n = legend.ticks.length;
   for (let i = 0; i < n; i++) {   // ticks are evenly spaced along the legend, lowest at the bottom
     const y = Math.round(y0 + barH - 1 - (barH - 1) * (n > 1 ? i / (n - 1) : 0)) + 0.5;
-    ctx.beginPath(); ctx.moveTo(x + barW, y); ctx.lineTo(x + barW + 5, y); ctx.stroke();
-    ctx.fillText(legend.ticks[i], x + barW + 8, y);
+    ctx.beginPath(); ctx.moveTo(x + barW, y); ctx.lineTo(x + barW + 5 * k, y); ctx.stroke();
+    ctx.fillText(legend.ticks[i], x + barW + 8 * k, y);
   }
   // title sideways along the bar, to the right of the tick labels:
   // "Variable (units)", reading bottom-to-top like a matplotlib colorbar
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "center";
-  ctx.font = "600 13px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.font = snapFont(600, 13, k);
   let title = `${legend.label} (${legend.units})`;
-  while (ctx.measureText(title).width > barH + 60 && title.length > 8) title = title.slice(0, -2).trimEnd() + "…";
+  while (ctx.measureText(title).width > barH + 60 * k && title.length > 8) title = title.slice(0, -2).trimEnd() + "…";
   const tickW = Math.max(0, ...legend.ticks.map((t) => ctx.measureText(t).width));
   ctx.save();
-  ctx.translate(x + barW + 8 + tickW + 16, y0 + barH / 2);
+  ctx.translate(x + barW + 8 * k + tickW + 16 * k, y0 + barH / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.fillText(title, 0, 0);
   ctx.restore();
@@ -6269,20 +6519,36 @@ function snapStem() {
   return [ds, d.isDiff ? "diff" : null, d.var, state.experiment.replace(/\//g, "_"), statTok, time].filter(Boolean).join("_");
 }
 
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
 function snapSave(canvas, filename) {
   return new Promise((resolve) => {
     canvas.toBlob((blob) => {
       if (!blob) { setStatus("PNG export failed (canvas could not be encoded)", true); resolve(false); return; }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      saveBlob(blob, filename);
       resolve(true);
     }, "image/png");
+  });
+}
+
+// The current map or globe view as a framed figure (title, axes, colour
+// bar). opts.maxWidth caps the view's width in output pixels (GIF frames).
+async function snapCaptureView(opts = {}) {
+  const size = globe.open ? { x: window.innerWidth, y: window.innerHeight } : map.getSize();
+  const dpr = opts.maxWidth ? Math.min(1, opts.maxWidth / size.x) : undefined;
+  const shot = globe.open ? await snapshotGlobe({ dpr }) : await snapshotMap({ dpr });
+  const axes = globe.open ? null : snapAxisTicks(0, 0, size.x, size.y);
+  return snapFrame(shot, size.x, size.y, {
+    title: snapTitle(), axes, legend: snapLegend, uiScale: dpr ? 1 / dpr : 1,
   });
 }
 
@@ -6292,12 +6558,7 @@ async function downloadViewPNG() {
   el("dl-png").disabled = true;
   setStatus("Rendering PNG of the current view…");
   try {
-    const shot = globe.open ? await snapshotGlobe() : await snapshotMap();
-    const size = globe.open ? { w: window.innerWidth, h: window.innerHeight } : map.getSize();
-    const axes = globe.open ? null : snapAxisTicks(0, 0, size.x, size.y);
-    const canvas = snapFrame(shot, globe.open ? size.w : size.x, globe.open ? size.h : size.y, {
-      title: snapTitle(), axes, legend: snapLegend,
-    });
+    const canvas = await snapCaptureView();
     const ok = await snapSave(canvas, `${snapStem()}_${globe.open ? "globe" : "map"}.png`);
     if (ok) setStatus(`PNG saved (${canvas.width}×${canvas.height})`);
   } catch (e) {
@@ -6325,53 +6586,501 @@ function snapWaitForTiles(maxMs = 5000) {
 // PNG of just the box: fit the map to the box (so all of it is on screen
 // at the best zoom), snapshot, crop to the box's pixel rectangle, then
 // restore the previous view. The outline and handles are hidden for the
-// shot so only the contents remain.
+// shot so only the contents remain. Split into begin / capture / end so
+// the GIF export can capture many frames in one fitted view.
+async function boxSnapBegin() {
+  boxUpdateSize();
+  box.snapCtx = {
+    wasGlobe: globe.open, prevCenter: map.getCenter(), prevZoom: map.getZoom(),
+    handles: BOX_CORNERS.map((c) => box.handles[c] && box.handles[c].getElement()).filter(Boolean),
+  };
+  const c = box.snapCtx;
+  if (c.wasGlobe) await toggleGlobe({ sync: false });
+  map.fitBounds(box.rect.getBounds(), { animate: false, padding: [8, 8] });
+  box.rect.setStyle({ opacity: 0, fillOpacity: 0 });
+  c.handles.forEach((h) => { h.style.visibility = "hidden"; });
+  await snapWaitForTiles();
+  await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
+}
+
+// Snapshot the fitted map, crop to the box and frame it (title, axes,
+// colour bar). opts.maxWidth caps the box's width in output pixels.
+async function boxSnapCapture(opts = {}) {
+  const lb = box.rect.getBounds();
+  const nw = map.latLngToContainerPoint(lb.getNorthWest());
+  const se = map.latLngToContainerPoint(lb.getSouthEast());
+  const size = map.getSize();
+  const x0 = Math.max(0, Math.min(nw.x, se.x)), y0 = Math.max(0, Math.min(nw.y, se.y));
+  const x1 = Math.min(size.x, Math.max(nw.x, se.x)), y1 = Math.min(size.y, Math.max(nw.y, se.y));
+  const w = Math.max(1, Math.round(x1 - x0)), h = Math.max(1, Math.round(y1 - y0));
+  const dprCap = opts.maxWidth ? Math.min(1, opts.maxWidth / w) : undefined;
+  const full = await snapshotMap({ dpr: dprCap });
+  const dpr = full.width / el("map").getBoundingClientRect().width;
+  const crop = document.createElement("canvas");
+  crop.width = Math.round(w * dpr);
+  crop.height = Math.round(h * dpr);
+  crop.getContext("2d").drawImage(full, x0 * dpr, y0 * dpr, w * dpr, h * dpr, 0, 0, crop.width, crop.height);
+  const b = box.bounds;
+  return snapFrame(crop, w, h, {
+    legend: snapLegend,
+    title: `${snapTitle()} · box ${snapFmtLat(b.south)} to ${snapFmtLat(b.north)}, ` +
+           `${snapFmtLon(b.west)} to ${snapFmtLon(b.east)}`,
+    axes: snapAxisTicks(x0, y0, w, h),
+    uiScale: dprCap ? 1 / dprCap : 1,
+  });
+}
+
+async function boxSnapEnd() {
+  const c = box.snapCtx;
+  box.snapCtx = null;
+  if (!c) return;
+  if (box.rect) box.rect.setStyle({ opacity: 1, fillOpacity: BOX_STYLE.fillOpacity });
+  c.handles.forEach((h) => { h.style.visibility = ""; });
+  map.setView(c.prevCenter, c.prevZoom, { animate: false });
+  if (c.wasGlobe) await toggleGlobe({ sync: false });
+  boxUpdateSize();
+}
+
 async function boxDownloadPNG() {
   if (!box.bounds || !box.rect || snap.busy) return;
   snap.busy = true;
-  boxUpdateSize();
   setStatus("Rendering PNG of the box contents…");
-  const wasGlobe = globe.open;
-  const prevCenter = map.getCenter(), prevZoom = map.getZoom();
-  const handles = BOX_CORNERS.map((c) => box.handles[c] && box.handles[c].getElement()).filter(Boolean);
   try {
-    if (wasGlobe) await toggleGlobe({ sync: false });
-    const lb = box.rect.getBounds();
-    map.fitBounds(lb, { animate: false, padding: [8, 8] });
-    box.rect.setStyle({ opacity: 0, fillOpacity: 0 });
-    handles.forEach((h) => { h.style.visibility = "hidden"; });
-    await snapWaitForTiles();
-    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
-    const full = await snapshotMap();
-    const dpr = full.width / el("map").getBoundingClientRect().width;
-    const nw = map.latLngToContainerPoint(lb.getNorthWest());
-    const se = map.latLngToContainerPoint(lb.getSouthEast());
-    const size = map.getSize();
-    const x0 = Math.max(0, Math.min(nw.x, se.x)), y0 = Math.max(0, Math.min(nw.y, se.y));
-    const x1 = Math.min(size.x, Math.max(nw.x, se.x)), y1 = Math.min(size.y, Math.max(nw.y, se.y));
-    const w = Math.max(1, Math.round(x1 - x0)), h = Math.max(1, Math.round(y1 - y0));
-    const crop = document.createElement("canvas");
-    crop.width = Math.round(w * dpr);
-    crop.height = Math.round(h * dpr);
-    crop.getContext("2d").drawImage(full, x0 * dpr, y0 * dpr, w * dpr, h * dpr, 0, 0, crop.width, crop.height);
+    await boxSnapBegin();
+    const out = await boxSnapCapture();
     const b = box.bounds;
-    const out = snapFrame(crop, w, h, {
-      legend: snapLegend,
-      title: `${snapTitle()} · box ${snapFmtLat(b.south)} to ${snapFmtLat(b.north)}, ` +
-             `${snapFmtLon(b.west)} to ${snapFmtLon(b.east)}`,
-      axes: snapAxisTicks(x0, y0, w, h),
-    });
     const f = (v) => v.toFixed(2).replace("-", "m");
     const ok = await snapSave(out, `${snapStem()}_box_${f(b.south)}_${f(b.north)}_${f(normLon(b.west))}_${f(normLon(b.east))}.png`);
     if (ok) setStatus(`Box PNG saved (${out.width}×${out.height})`);
   } catch (e) {
     setStatus(`Box PNG failed: ${e.message || e}`, true);
   } finally {
-    box.rect.setStyle({ opacity: 1, fillOpacity: BOX_STYLE.fillOpacity });
-    handles.forEach((h) => { h.style.visibility = ""; });
-    map.setView(prevCenter, prevZoom, { animate: false });
-    if (wasGlobe) await toggleGlobe({ sync: false });
+    await boxSnapEnd();
     snap.busy = false;
     boxUpdateSize();
   }
 }
+
+// ------------------------------------------------- animated GIF export
+// Steps the selection through a time range, snapshots every frame the way
+// the PNG export does (the map or globe view, or just the box contents)
+// and encodes them in the browser (vendor/gifenc.esm.js). All frames share
+// one colour scale and one palette, so nothing flickers between frames.
+// Progress is per frame, with a running time-remaining estimate.
+//
+// Two ways to build, chosen by gifStreams():
+//  - streamed: fetch, paint, snapshot, encode and drop one frame at a time
+//    (flat memory, so long runs are fine). Possible when the colour scale
+//    is fixed: a plain member/value of a variable with a hand-built scale.
+//  - held: ensemble statistics and auto-scaled variables pick one scale
+//    from the 2nd–98th percentiles of EVERY frame, so all fields are
+//    fetched first (about 1 MB each) and then rendered.
+const GIF_MAX_FRAMES = { stream: 1500, held: 366 };
+const GIF_SIZES = [["1600", "Large"], ["1100", "Medium"], ["700", "Small"]]; // max frame width, px
+const GIF_RENDER_GUESS_MS = 500; // per-frame render + encode guess until measured
+const GIF_INFO_TEXT =
+  "Steps the current variable, scenario, statistic and level through the " +
+  "range and saves the frames as one animated GIF of the map or globe view, " +
+  "framed like the PNG export with whatever labels, contours and stations " +
+  "are shown. All frames share one colour scale and one colour palette. " +
+  "Frame is how long each time step shows. Every N takes every Nth month " +
+  "(or day): 12 on monthly data gives one frame per year, 7 on daily data " +
+  "one per week. Size caps the frame width (smaller frames make a much " +
+  `smaller file). Plain member/value animations are built one frame at a time (up to ` +
+  `${GIF_MAX_FRAMES.stream} frames); ensemble statistics and auto-scaled variables are ` +
+  `fetched in full first to fix one colour scale (up to ${GIF_MAX_FRAMES.held} frames). ` +
+  "The box card's GIF button does the same for just the box contents over its Months range.";
+const gif = { busy: false, abort: false, width: 1100 };
+
+function gifLib() {
+  const g = window.GIFENC;
+  if (!g) throw new Error("GIF encoder did not load (vendor/gifenc.esm.js)");
+  return g;
+}
+
+function gifStreams() {
+  const stat = state.stat || "raw";
+  return stat === "raw" && !varConfigFor(state.var).dynamic;
+}
+function gifMaxFrames() { return gifStreams() ? GIF_MAX_FRAMES.stream : GIF_MAX_FRAMES.held; }
+
+function gifStride() {
+  const v = Math.round(+el("gif-stride").value);
+  return Number.isFinite(v) && v >= 1 ? Math.min(v, 366) : 1;
+}
+
+function gifDelay() {
+  const v = Math.round(+el("gif-delay").value);
+  return Number.isFinite(v) && v >= 20 ? Math.min(v, 10000) : 500;
+}
+
+// "YYYY", "YYYY-MM" or "YYYY-MM-DD" -> a time at the variable's frequency
+// (start of the period for a range start, end of it for a range end), or
+// null if it doesn't parse.
+function gifParseTime(v, isEnd) {
+  v = (v || "").trim();
+  let y, m, d;
+  if (/^\d{4}$/.test(v)) { y = v; m = isEnd ? "12" : "01"; }
+  else if (/^\d{4}-(0[1-9]|1[0-2])$/.test(v)) { [y, m] = v.split("-"); }
+  else if (/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(v)) { [y, m, d] = v.split("-"); }
+  else return null;
+  if (timeFreq() !== "day") return `${y}-${m}`;
+  return d ? `${y}-${m}-${d}` : toDayStr(`${y}-${m}`, isEnd);
+}
+
+// Every `step`-th time from start to end (inclusive), clipped to the
+// scenario. Stops one past the frame cap so callers can tell "too many".
+function gifTimes(start, end, step = 1) {
+  const exp = meta.experiments[state.experiment];
+  const cap = gifMaxFrames();
+  const out = [];
+  step = Math.max(1, step | 0);
+  if (timeFreq() === "day") {
+    const lo = toDayStr(start, false), hi = toDayStr(end, true);
+    const eLo = toDayStr(exp.start, false), eHi = toDayStr(exp.end, true);
+    const first = lo < eLo ? eLo : lo, last = hi > eHi ? eHi : hi;
+    const d = new Date(`${first}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return out;
+    while (out.length <= cap) {
+      const t = d.toISOString().slice(0, 10);
+      if (t > last) break;
+      out.push(t);
+      d.setUTCDate(d.getUTCDate() + step);
+    }
+  } else {
+    const e = expMonths(exp);
+    const s = toMonthStr(start), en = toMonthStr(end);
+    const first = s < e.start ? e.start : s, last = en > e.end ? e.end : en;
+    let [y, m] = first.split("-").map(Number);
+    while (out.length <= cap) {
+      const t = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}`;
+      if (t > last) break;
+      out.push(t);
+      m += step;
+      while (m > 12) { m -= 12; y += 1; }
+    }
+  }
+  return out;
+}
+
+// Default range: a year from the selected month (a month from the
+// selected day for daily data), clipped to the scenario.
+function gifDefaultRange() {
+  const exp = meta.experiments[state.experiment];
+  const cur = el("month-input").value;
+  if (timeFreq() === "day") {
+    const s = toDayStr(cur || exp.start, false);
+    const d = new Date(`${s}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 29);
+    const e = d.toISOString().slice(0, 10), eHi = toDayStr(exp.end, true);
+    return { start: s, end: e > eHi ? eHi : e };
+  }
+  const em = expMonths(exp);
+  const s = toMonthStr(cur) || em.start;
+  let [y, m] = s.split("-").map(Number);
+  m += 11;
+  if (m > 12) { m -= 12; y += 1; }
+  const e = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}`;
+  return { start: s, end: e > em.end ? em.end : e };
+}
+
+function fmtDuration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60), r = s % 60;
+  return r ? `${m} min ${r} s` : `${m} min`;
+}
+
+function gifToggleCard(open) {
+  const card = el("gif-card");
+  const show = open == null ? card.hidden : open;
+  if (show && !meta) return;
+  if (show) {
+    const r = gifDefaultRange();
+    const daily = timeFreq() === "day";
+    for (const [id, v] of [["gif-start", r.start], ["gif-end", r.end]]) {
+      const input = el(id);
+      input.placeholder = daily ? "YYYY-MM-DD" : "YYYY-MM";
+      input.title = `${daily ? "YYYY-MM-DD, YYYY-MM" : "YYYY-MM"} or just YYYY`;
+      if (!input.value) input.value = v; // keep a range the user already typed
+    }
+  }
+  card.hidden = !show;
+  el("dl-gif").classList.toggle("active", show);
+  gifRefreshNote();
+}
+
+// Frame count and play length under the inputs (red when unusable).
+function gifRefreshNote() {
+  const note = el("gif-note");
+  if (!note || el("gif-card").hidden || !meta) return;
+  const daily = timeFreq() === "day";
+  const unit = daily ? "day" : "month";
+  el("gif-stride-unit").textContent = `${unit}s`;
+  const s = gifParseTime(el("gif-start").value, false), e = gifParseTime(el("gif-end").value, true);
+  const step = gifStride(), cap = gifMaxFrames();
+  let msg, bad = false;
+  if (!s || !e) { msg = `Type times as ${daily ? "YYYY-MM-DD" : "YYYY-MM"} (or just YYYY).`; bad = true; }
+  else if (e < s) { msg = "The end is before the start."; bad = true; }
+  else {
+    const times = gifTimes(s, e, step), n = times.length;
+    if (n < 2) { msg = "The range needs at least 2 frames inside the scenario."; bad = true; }
+    else if (n > cap) {
+      msg = `More than ${cap} frames — shorten the range or raise Every N` +
+            (gifStreams() ? "." : ` (statistics and auto-scaled variables hold every field in memory to share one colour scale).`);
+      bad = true;
+    }
+    else if (state.compare) { msg = "Not available in compare mode (A − B)."; bad = true; }
+    else {
+      const delay = gifDelay();
+      msg = `${n} frames${step > 1 ? ` (every ${step} ${unit}s)` : ""}, ${times[0]} to ${times[n - 1]} · ` +
+            `plays in ${fmtDuration(n * delay)} at ${delay} ms per frame`;
+    }
+  }
+  note.textContent = msg;
+  note.classList.toggle("over", bad);
+  el("gif-make").disabled = bad || gif.busy;
+}
+
+function gifSetBusy(busy) {
+  for (const id of ["dl-gif", "dl-png"]) el(id).disabled = busy;
+  gifRefreshNote();
+  boxUpdateSize(); // the box card's PNG/GIF buttons follow snap.busy
+}
+
+// Resolves once the overlay shows a new image (renderMeta repaints it
+// asynchronously via toBlob), or after a timeout as a safety net.
+function gifWaitOverlay(timeoutMs = 10000) {
+  const img0 = overlays[0] && overlays[0]._image;
+  const prevSrc = img0 ? img0.src : null;
+  const t0 = performance.now();
+  return new Promise((resolve) => {
+    const check = () => {
+      const img = overlays[0] && overlays[0]._image;
+      const fresh = img && img.src !== prevSrc && img.complete && img.naturalWidth > 0;
+      if (fresh || performance.now() - t0 > timeoutMs) resolve();
+      else setTimeout(check, 25);
+    };
+    setTimeout(check, 25);
+  });
+}
+
+// Progress overlay: percent and the time remaining from the measured
+// per-frame rate. A held build has two phases (fetch all, then render);
+// a streamed build is one phase where each frame fetches as it renders.
+function gifProgress(p) {
+  const now = performance.now();
+  const n = p.n;
+  let left, what, pct;
+  if (p.stream) {
+    pct = (p.rendered / n) * 99;
+    const per = p.rendered ? (now - p.tRender) / p.rendered : null;
+    left = per == null ? null : per * (n - p.rendered);
+    what = `Frame ${Math.min(p.rendered + 1, n)} of ${n}` + (p.wind ? " (field + wind)" : "");
+  } else if (p.tRender == null) {
+    pct = (p.fetched / (2 * n)) * 99;
+    const per = p.fetched ? (now - p.tFetch) / p.fetched : null;
+    left = per == null ? null : per * (n - p.fetched) + n * GIF_RENDER_GUESS_MS;
+    what = `Fetching frame ${Math.min(p.fetched + 1, n)} of ${n}` + (p.wind ? " (field + wind)" : "");
+  } else {
+    pct = ((n + p.rendered) / (2 * n)) * 99;
+    const per = p.rendered ? (now - p.tRender) / p.rendered : null;
+    left = per == null ? null : per * (n - p.rendered);
+    what = `Rendering frame ${Math.min(p.rendered + 1, n)} of ${n}`;
+  }
+  el("load-pct").textContent = `${Math.round(pct)}%`;
+  el("load-note").innerHTML =
+    `${what} · ${p.time}<br>` +
+    (left == null
+      ? "Estimating time remaining…"
+      : `About ${fmtDuration(left)} remaining` + (!p.stream && p.tRender == null ? " (rendering time estimated)" : ""));
+}
+
+// One palette for every frame. Quantizing each frame on its own makes the
+// colour bar (and the map colours) shift from frame to frame as the 256
+// cut points move. Built from the first frame plus, weighted at a few
+// percent of the pixels, the colour bar as drawn and the colour scale
+// itself, so every ramp colour survives the cut even if the first frame
+// barely uses it.
+function gifPalette(enc, data) {
+  const extras = [];
+  const src = el("legend-canvas");
+  const row = src.getContext("2d").getImageData(0, 0, src.width, 1).data;
+  const bar = new Uint8ClampedArray(row.length);
+  for (let i = 0; i < row.length; i += 4) { // composited over white, as snapColorbar draws it
+    const al = row[i + 3] / 255;
+    bar[i] = row[i] * al + 255 * (1 - al);
+    bar[i + 1] = row[i + 1] * al + 255 * (1 - al);
+    bar[i + 2] = row[i + 2] * al + 255 * (1 - al);
+    bar[i + 3] = 255;
+  }
+  extras.push(bar);
+  if (currentLUT && currentLUT.data) {
+    const l = currentLUT.data, op = new Uint8ClampedArray(l.length);
+    for (let i = 0; i < l.length; i += 4) { op[i] = l[i]; op[i + 1] = l[i + 1]; op[i + 2] = l[i + 2]; op[i + 3] = 255; }
+    extras.push(op);
+  }
+  const extraLen = extras.reduce((s, e) => s + e.length, 0);
+  const reps = Math.max(1, Math.round((data.length * 0.04) / extraLen));
+  const sample = new Uint8ClampedArray(data.length + extraLen * reps);
+  sample.set(data);
+  let off = data.length;
+  for (let r = 0; r < reps; r++) for (const e of extras) { sample.set(e, off); off += e.length; }
+  return enc.quantize(sample, 256);
+}
+
+// kind: "view" (map or globe, range from the GIF card) or "box" (the box
+// contents over the box card's Months range). Frame time, Every N and
+// Size come from the GIF card either way.
+async function gifRun(kind) {
+  if (gif.busy || snap.busy || !currentDisplay || !meta) return;
+  if (state.compare) { setStatus("GIF: not available in compare mode (A − B)", true); return; }
+  if (kind === "box" && (!box.bounds || !box.rect)) return;
+  const daily = timeFreq() === "day";
+  const step = gifStride(), cap = gifMaxFrames(), streaming = gifStreams();
+  let times;
+  if (kind === "box") {
+    times = gifTimes(box.range.start, box.range.end, step);
+  } else {
+    const s = gifParseTime(el("gif-start").value, false), e = gifParseTime(el("gif-end").value, true);
+    if (!s || !e) { setStatus(`GIF: type times as ${daily ? "YYYY-MM-DD" : "YYYY-MM"} (or just YYYY)`, true); return; }
+    times = gifTimes(s, e, step);
+  }
+  const n = times.length;
+  if (n < 2) { setStatus("GIF: the range needs at least 2 frames inside the scenario", true); return; }
+  if (n > cap) {
+    setStatus(`GIF: more than ${cap} frames — shorten the ${kind === "box" ? "box's Months " : ""}range or raise Every N`, true);
+    return;
+  }
+  let enc;
+  try { enc = gifLib(); } catch (e) { setStatus(`GIF: ${e.message}`, true); return; }
+  if (playback.frames || playback.playing || playback.loading) discardPlayback();
+
+  gif.busy = true;
+  gif.abort = false;
+  snap.busy = true;
+  gifSetBusy(true);
+  const origTime = el("month-input").value;
+  const stem = snapStem().slice(0, origTime ? -(origTime.length + 1) : undefined);
+  const delay = gifDelay();
+  const maxWidth = gif.width;
+  const withWind = el("particles-toggle").checked && hasWind();
+  const isPlev = meta.variables[state.var].plev;
+  const p = { n, stream: streaming, fetched: 0, rendered: 0, tFetch: performance.now(), tRender: null, time: times[0], wind: withWind };
+  el("load-overlay").hidden = false;
+  el("load-title").textContent = `Building ${kind === "box" ? "box " : ""}GIF…`;
+  el("load-cancel").hidden = false;
+  gifProgress(p);
+
+  // one frame's field (and wind, if particles are shown), parsed to grids
+  const fetchFrame = async (t) => {
+    const f = await fetchField({ experiment: state.experiment, member: state.member, stat: state.stat, time: t });
+    f._grid = toFloat32(f.values, f.nlat, f.nlon);
+    f.values = null; // free the parsed JSON
+    let w = null;
+    if (withWind) {
+      const wp = {
+        dataset: state.dataset, experiment: state.experiment,
+        member: state.stat === "raw" ? state.member : "ensmean", time: t,
+      };
+      if (isPlev) wp.plev = state.plev;
+      w = await fetchJSON(`${API}/api/wind?${new URLSearchParams(wp)}`);
+      w._u = toFloat32(w.u, w.nlat, w.nlon);
+      w._v = toFloat32(w.v, w.nlat, w.nlon);
+      w.u = w.v = null;
+    }
+    return { f, w };
+  };
+
+  let err = null, bytes = null, frames = 0, outW = 0, outH = 0;
+  try {
+    // 1. colour scale: fixed (streamed build), or from every field (held)
+    let lut;
+    const held = [];
+    if (streaming) {
+      lut = buildLUT(state.var);
+    } else {
+      for (const t of times) {
+        if (gif.abort) throw new Error("cancelled");
+        held.push(await fetchFrame(t));
+        p.fetched++;
+        p.time = times[Math.min(p.fetched, n - 1)];
+        gifProgress(p);
+      }
+      lut = commonLUTFor(held.map((h) => h.f));
+    }
+
+    // 2. show each frame through the normal render path, snapshot, encode
+    p.tRender = performance.now();
+    p.time = times[0];
+    gifProgress(p);
+    if (kind === "box") await boxSnapBegin();
+    const encoder = enc.GIFEncoder();
+    let palette = null;
+    for (let i = 0; i < n; i++) {
+      if (gif.abort) throw new Error("cancelled");
+      const { f, w } = streaming ? await fetchFrame(times[i]) : held[i];
+      if (!streaming) held[i] = null; // free as we go
+      currentField = f;
+      currentFieldB = null;
+      currentDisplay = f;
+      currentLUT = lut;
+      if (w) currentWind = w; // particles follow this frame's wind
+      el("month-input").value = f.time;
+      const painted = gifWaitOverlay();
+      renderMeta(); // legend, contours, overlay paint, globe
+      await painted;
+      await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 60)));
+      const canvas = kind === "box"
+        ? await boxSnapCapture({ maxWidth })
+        : await snapCaptureView({ maxWidth });
+      const { data, width, height } = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+      if (!palette) palette = gifPalette(enc, data);
+      const index = enc.applyPalette(data, palette);
+      encoder.writeFrame(index, width, height, { palette, delay, repeat: 0 });
+      frames++;
+      outW = width;
+      outH = height;
+      p.rendered++;
+      p.time = times[Math.min(p.rendered, n - 1)];
+      gifProgress(p);
+      await new Promise((r) => setTimeout(r, 0)); // let the page breathe between frames
+    }
+    encoder.finish();
+    bytes = encoder.bytes();
+  } catch (e) {
+    err = e;
+  } finally {
+    await boxSnapEnd(); // no-op unless a box capture began
+    el("load-overlay").hidden = true;
+    el("load-cancel").hidden = true;
+    el("month-input").value = origTime;
+    gif.busy = false;
+    snap.busy = false;
+    gifSetBusy(false);
+    await loadField(); // back to the selected time, on its own colour scale
+  }
+  if (err) {
+    if (String(err.message || err) === "cancelled") setStatus("GIF cancelled");
+    else setStatus(`GIF failed: ${err.message || err}`, true);
+    return;
+  }
+  const blob = new Blob([bytes], { type: "image/gif" });
+  const view = kind === "box" ? "box" : globe.open ? "globe" : "map";
+  const every = step > 1 ? `_every${step}${daily ? "d" : "m"}` : "";
+  saveBlob(blob, `${stem}_${times[0]}_to_${times[n - 1]}${every}_${view}.gif`);
+  setStatus(`GIF saved: ${frames} frames, ${outW}×${outH}, ${(blob.size / 1048576).toFixed(1)} MB`);
+}
+
+el("dl-gif").addEventListener("click", () => gifToggleCard());
+el("gif-close").addEventListener("click", () => gifToggleCard(false));
+el("gif-make").addEventListener("click", () => gifRun("view"));
+for (const id of ["gif-start", "gif-end", "gif-delay", "gif-stride"]) {
+  el(id).addEventListener("change", gifRefreshNote);
+  el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+}
+el("gif-info").addEventListener("click", (e) => {
+  e.stopPropagation();
+  showInfoPopover(GIF_INFO_TEXT, e.clientX, e.clientY);
+});
+buildSeg("gif-size-seg", GIF_SIZES, String(gif.width), (v) => { gif.width = +v; });

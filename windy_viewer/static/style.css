@@ -11,6 +11,8 @@
      The map/globe canvases are deliberately NOT scaled (Leaflet click
      coordinates break under CSS zoom); they fill the screen either way. */
   --ui-scale: 0.8;
+  /* side panel width; the resizer sets it (remembered per browser) */
+  --panel-w: 280px;
 }
 /* short displays (compact laptops): step the chrome down so the side
    panel still fits without a scrollbar */
@@ -57,7 +59,7 @@ html, body {
   top: 12px;
   left: 12px;
   z-index: 1000;
-  width: 280px;
+  width: var(--panel-w);
   /* vh resolves against the real viewport and is then multiplied by the
      chrome zoom — divide by the scale so the rendered height is a true
      100vh minus room for the data-access box */
@@ -75,6 +77,29 @@ html, body {
   border-radius: 10px;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
 }
+/* drag strip down the panel's right edge (sticky, so it stays put when
+   the panel scrolls); the ::before is the hit area and the hover line */
+.panel-resizer {
+  position: sticky;
+  top: -14px; /* the panel's top padding: stick to its very top */
+  height: 0;
+  z-index: 5;
+}
+.panel-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: -16px; /* the panel's right padding: flush with its edge */
+  width: 9px;
+  height: 100vh;
+  cursor: col-resize;
+  border-right: 2px solid transparent;
+  transition: border-color 0.15s;
+}
+.panel-resizer:hover::before,
+body.panel-resizing .panel-resizer::before { border-right-color: var(--accent); }
+body.panel-resizing { cursor: col-resize; user-select: none; }
+body.panel-resizing .panel { transition: none; }
 .panel::-webkit-scrollbar { width: 7px; }
 .panel::-webkit-scrollbar-track { background: transparent; }
 .panel::-webkit-scrollbar-thumb {
@@ -298,18 +323,52 @@ html, body {
 .dl-buttons {
   display: flex;
   gap: 4px;
+  width: 100%;
 }
 .dl-buttons button {
+  flex: 1 1 auto;
+  white-space: nowrap;
   background: #242423;
   color: var(--ink-2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 5px 10px;
+  padding: 5px 8px;
   font: inherit;
   font-size: 13px;
   cursor: pointer;
 }
 .dl-buttons button:hover { background: #2e2e2c; color: var(--ink); }
+.dl-buttons button:disabled { opacity: 0.45; cursor: not-allowed; }
+.dl-buttons button.active { border-color: var(--accent); color: var(--ink); }
+
+/* animated GIF settings, opened by the GIF download button */
+.gif-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 10px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.gif-card[hidden] { display: none; }
+.gif-title { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.gif-range { flex-wrap: wrap; }
+.gif-card .ts-range input[type="text"] { width: 82px; flex: 0 0 auto; } /* beats the wider .ts-range rule below */
+.gif-range label { display: flex; align-items: center; gap: 4px; }
+.gif-range .seg { width: auto; flex: 1; }
+.gif-range input[type="number"] {
+  background: #242423;
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 5px;
+  font: 12px system-ui, sans-serif;
+  width: 64px;
+}
+.gif-size-seg button { padding: 2px 8px; font-size: 11px; }
+.gif-actions { padding: 2px 0 0; }
+.box-note.over { color: #e66767; }
 
 .compare-title {
   font-size: 12px;
@@ -1167,7 +1226,7 @@ html, body {
 .globe-btn {
   position: fixed;
   top: 12px;
-  left: 334px; /* right of the panel, clearing its scrollbar-widened state */
+  left: calc(var(--panel-w) + 54px); /* right of the panel, clearing its scrollbar-widened state */
   z-index: 1100;
   padding: 12px 22px;
   background: color-mix(in srgb, var(--surface) 92%, transparent);
@@ -1196,7 +1255,7 @@ html, body {
 .grat-box {
   position: fixed;
   top: 118px; /* under the Globe/Map and Draw-a-Box buttons */
-  left: 334px;
+  left: calc(var(--panel-w) + 54px);
   z-index: 1100;
   display: flex;
   flex-direction: column;
@@ -1220,7 +1279,7 @@ html, body {
 .globe-note {
   position: fixed;
   top: 256px;
-  left: 334px;
+  left: calc(var(--panel-w) + 54px);
   z-index: 1100;
   max-width: 190px;
   padding: 8px 12px;
@@ -1511,11 +1570,11 @@ html, body {
   .play-bar { transform: translateX(-50%) scale(var(--ui-scale)); transform-origin: bottom center; }
   .globe-hint { transform: translateX(-50%) scale(var(--ui-scale)); transform-origin: bottom center; }
   .panel { top: calc(12px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
-  .globe-btn { top: calc(12px * var(--ui-scale)); left: calc(334px * var(--ui-scale)); }
+  .globe-btn { top: calc(12px * var(--ui-scale)); left: calc((var(--panel-w) + 54px) * var(--ui-scale)); }
   .globe-btn.box-btn { top: calc(64px * var(--ui-scale)); }
-  .grat-box { top: calc(118px * var(--ui-scale)); left: calc(334px * var(--ui-scale)); }
+  .grat-box { top: calc(118px * var(--ui-scale)); left: calc((var(--panel-w) + 54px) * var(--ui-scale)); }
   .rotate-btn { top: calc(202px * var(--ui-scale)); }
-  .globe-note { top: calc(256px * var(--ui-scale)); left: calc(334px * var(--ui-scale)); }
+  .globe-note { top: calc(256px * var(--ui-scale)); left: calc((var(--panel-w) + 54px) * var(--ui-scale)); }
   .data-access { bottom: calc(24px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
   .clear-box { bottom: calc(92px * var(--ui-scale)); left: calc(12px * var(--ui-scale)); }
   .ask-bubble { top: calc(16px * var(--ui-scale)); right: calc(16px * var(--ui-scale)); }

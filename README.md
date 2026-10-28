@@ -7,10 +7,10 @@ ensemble**, streaming data on demand from the public ArrayLake/Icechunk store
 
 **Features**: 16 monthly variables (atmosphere incl. pressure levels, ocean
 SST) · ensemble member / mean / spread / deviation statistics · A−B compare
-mode · wind particle animation · rotatable 3-D globe view · virtual stations
+mode · wind particle animation · flat grid-cell view for diagnostics · rotatable 3-D globe view · virtual stations
 with time-series extraction and merged plots · year playback · value
 filtering · unit conversion · NetCDF/CSV downloads with full source
-metadata · **SPEAK**, a rate-limited RAG chatbot
+metadata · PNG and animated GIF exports of the view or a drawn box · **SPEAK**, a rate-limited RAG chatbot
 (Gemini) that sees the on-screen selection statistics.
 
 ## Layout
