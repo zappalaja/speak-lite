@@ -3342,7 +3342,12 @@ async function init() {
   state.plev = meta.levels.includes(500) ? 500 : (meta.levels[0] || 500);
   // rows that make no sense for this dataset
   const fcst = isForecast();
-  el("exp-row").hidden = el("exp-row-b").hidden = fcst || Object.keys(meta.experiments).length < 2;
+  // A single experiment with a curated name (e.g. SPEAR's "Historical")
+  // still shows, so users see which scenario they are looking at; a lone
+  // unnamed catalog experiment adds nothing and stays hidden.
+  const expIds = Object.keys(meta.experiments);
+  const namedSingle = expIds.length === 1 && !!meta.experiments[expIds[0]].short;
+  el("exp-row").hidden = el("exp-row-b").hidden = fcst || (expIds.length < 2 && !namedSingle);
   el("init-row").hidden = el("init-row-b").hidden = !fcst;
   el("member-row").hidden = el("member-row-b").hidden = !meta.ensemble;
   el("stat-row").hidden = el("stat-row-b").hidden = !meta.ensemble;

@@ -683,7 +683,9 @@ SPEAR_DEFAULT = {
     "grid": "0.5 deg lat x 0.625 deg lon (gr3), longitudes 0-360",
     "experiments": {
         "historical": {"start": "1921-01", "end": "2014-12", "short": "Historical"},
-        "scenarioSSP5-85": {"start": "2015-01", "end": "2100-12", "short": "SSP5-8.5"},
+        # TEMPORARILY HIDDEN: uncomment this line to bring SSP5-8.5 back into the
+        # viewer (experiment picker, links, chat context). Nothing else to change.
+        # "scenarioSSP5-85": {"start": "2015-01", "end": "2100-12", "short": "SSP5-8.5"},
     },
     "groups": ["Amon", "Omon"],
     "level_chunk": 9,
@@ -706,8 +708,10 @@ SPEAR_DEFAULT = {
         "tos": {"label": "SST", "long": "Sea Surface Temperature (ocean, 1° grid)"},
     },
     "chat_notes": (
-        "The dataset is the NOAA GFDL SPEAR-MED large ensemble (30 members, experiments: "
-        "historical 1921-2014 and SSP5-8.5 2015-2100, monthly means, 0.5°x0.625° atmosphere). "
+        "The dataset is the NOAA GFDL SPEAR-MED large ensemble (30 members, experiment: "
+        # TEMPORARILY HIDDEN with SSP5-8.5 above; restore this wording with it:
+        # "historical 1921-2014 and SSP5-8.5 2015-2100, monthly means, 0.5°x0.625° atmosphere). "
+        "historical 1921-2014, monthly means, 0.5°x0.625° atmosphere). "
         "If the user asks where to find or download the SPEAR data itself, point them to the "
         "public AWS S3 bucket: https://noaa-gfdl-spear-large-ensembles-pds.s3.amazonaws.com/"
         "index.html#SPEAR/GFDL-LARGE-ENSEMBLES/CMIP/NOAA-GFDL/GFDL-SPEAR-MED/ . The core SPEAR "
