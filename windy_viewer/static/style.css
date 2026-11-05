@@ -486,6 +486,16 @@ body.panel-resizing .panel { transition: none; }
   font-size: 13px;
 }
 .pin-collapse:hover { color: var(--ink); }
+/* station card: the remove ✕ sits at the top right, where users expect it */
+.pin-remove {
+  float: right;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0 2px;
+  margin-left: 4px;
+  font-size: 13px;
+}
+.pin-remove:hover { color: #e66767; }
 .leaflet-tooltip.pin-tip {
   background: rgba(26, 26, 25, 0.94);
   color: var(--ink);
@@ -753,13 +763,6 @@ body.panel-resizing .panel { transition: none; }
   margin-right: 5px;
   vertical-align: middle;
 }
-.popup-ts-remove {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--muted);
-  cursor: pointer;
-}
-.popup-ts-remove:hover { color: #e66767; }
 
 .coord-lock { cursor: pointer; font-size: 11px; }
 .coord-lock:hover { filter: brightness(1.4); }
@@ -1010,6 +1013,14 @@ body.panel-resizing .panel { transition: none; }
 .contour-opts .filter-row[hidden] { display: none; }
 .contour-color-seg button { white-space: nowrap; flex: 1 1 0; padding: 5px 6px; }
 .contour-opts .filter-row .grow { flex: 1; min-width: 0; }
+.contour-opts select {
+  background: #242423; color: var(--ink); border: 1px solid var(--border); border-radius: 6px;
+  padding: 3px 4px; font: 12px system-ui, sans-serif; min-width: 0;
+}
+.contour-opts input:disabled + span, .contour-opts label:has(input:disabled) { opacity: 0.45; }
+.contour-color-seg button:disabled { opacity: 0.45; cursor: default; }
+.contour-units-seg { flex: 1; min-width: 0; }
+.contour-units-seg button { white-space: nowrap; flex: 1 1 0; padding: 4px 6px; font-size: 12px; }
 .contour-opts .filter-row input[type="text"] { width: auto; }
 .contour-opts .filter-row input[type="range"] { flex: 1; min-width: 60px; }
 .contour-opts .filter-row input[type="checkbox"] { width: 15px; height: 15px; margin: 0; }

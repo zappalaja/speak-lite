@@ -596,7 +596,7 @@ const WORLD_COPIES = [-720, -360, 0, 360, 720];
 // opacity %), wind=0 (particles off), glat=0/glon=0 (graticule),
 // cmap/cmapd (palette), vmin/vmax (pinned colour range, base units),
 // c=1 (contours on) with cmode, cint,
-// clev, cby, ccol, cw, cop, clab, ccase, cband. A link describes the whole
+// clev, cby, ccol, cw, cop, clab, ccase, cband, cvar. A link describes the whole
 // plot: anything absent means the default, not this browser's remembered
 // option. Every value is checked here for type, range and shape (and
 // again against the dataset where it is applied); anything else is
@@ -653,6 +653,7 @@ const URL_VIEW = (() => {
     for (const [k, sk] of [["clab", "labels"], ["ccase", "casing"], ["cband", "banded"]]) {
       if (bool(k) != null) c[sk] = bool(k);
     }
+    if (str("cvar") && /^[\w.-]{1,64}$/.test(str("cvar"))) c.var = str("cvar"); // must also exist in the dataset
     out.contours = c;
   }
   return out;
@@ -934,6 +935,7 @@ function syncUrl() {
     if (contours.labels !== d.labels) q.set("clab", contours.labels ? "1" : "0");
     if (contours.casing !== d.casing) q.set("ccase", contours.casing ? "1" : "0");
     if (contours.banded !== d.banded) q.set("cband", contours.banded ? "1" : "0");
+    if (contours.var !== d.var) q.set("cvar", contours.var);
   }
   if (state.compare) {
     q.set("compare", "1");
@@ -1000,7 +1002,7 @@ function saveState() {
         on: contours.on, mode: contours.mode, interval: contours.interval,
         custom: contours.custom, colorMode: contours.colorMode, color: contours.color,
         width: contours.width, opacity: contours.opacity, labels: contours.labels,
-        casing: contours.casing, banded: contours.banded,
+        casing: contours.casing, banded: contours.banded, var: contours.var,
       } : null,
       box: (typeof box !== "undefined" && box.bounds)
         ? { ...box.bounds, start: box.range.start, end: box.range.end, locked: box.locked }
@@ -2019,6 +2021,7 @@ function refreshPins() {
     p.marker.setIcon(pinIcon(i + 1));
     const head =
       `<span class="pin-num">#${i + 1}</span>` +
+      `<span class="pin-remove" onclick="pinRemoveIdx(${i}, event)" title="Remove this station">&#10005;</span>` +
       `<span class="pin-collapse" onclick="pinToggleCollapse(${i}, event)" ` +
       `title="${p.collapsed ? "Expand" : "Collapse"}">${p.collapsed ? "&#9656;" : "&#9662;"}</span>`;
     // Full-featured station card (readout, time series, coordinate lock),
@@ -2121,9 +2124,9 @@ async function fetchJSON(url) {
   return resp.json();
 }
 
-function fetchField(sel) {
-  const p = { dataset: state.dataset, var: state.var, ...sel };
-  if (meta.variables[state.var].plev) p.plev = state.plev;
+function fetchField(sel, varId = state.var) {
+  const p = { dataset: state.dataset, var: varId, ...sel };
+  if (meta.variables[varId].plev) p.plev = state.plev;
   return fetchJSON(`${API}/api/field?${new URLSearchParams(p)}`);
 }
 
@@ -2983,7 +2986,7 @@ function rebuildUnitSeg() {
     "unit-seg",
     unitOptionsFor(state.var).map((u) => [u.id, u.label]),
     state.units[state.var],
-    (id) => { state.units[state.var] = id; renderMeta(); saveState(); }
+    (id) => { state.units[state.var] = id; renderMeta(); saveState(); contoursSyncUI(); }
   );
 }
 
@@ -3741,9 +3744,6 @@ function tsSectionHTML(idx) {
     (t.ready && t.job
       ? `<img class="popup-ts-thumb" src="${API}/api/timeseries/plot/${t.job}.png" ` +
         `onclick="tsSpawnCard('${t.job}')" title="Click to enlarge" alt="time series preview" />`
-      : "") +
-    (t.pin
-      ? `<div class="popup-ts-remove" onclick="pinRemoveIdx(${idx}, event)">&#10005; remove this station</div>`
       : "") +
     `</div>`
   );
@@ -4613,6 +4613,7 @@ function globeSyncPinContent() {
     card.className = "globe-pin-card pin-tip";
     const head =
       `<span class="pin-num">#${i + 1}</span>` +
+      `<span class="pin-remove" onclick="pinRemoveIdx(${i}, event)" title="Remove this station">&#10005;</span>` +
       `<span class="pin-collapse" onclick="pinToggleCollapse(${i}, event)" ` +
       `title="${p.collapsed ? "Expand" : "Collapse"}">${p.collapsed ? "&#9656;" : "&#9662;"}</span>`;
     card.innerHTML = p.collapsed
@@ -6241,6 +6242,7 @@ const CONTOUR_DEFAULTS = {
   casing: true,        // dark outline under each line so it reads over any fill
   banded: true,        // flat fill colour between levels (filled-contour look)
   labels: true,
+  var: "",             // variable to contour: "" = the shaded field, else another variable
 };
 const contours = {
   ...CONTOUR_DEFAULTS,
@@ -6259,7 +6261,10 @@ map.createPane("contourLabels").style.zIndex = 436;
 map.getPane("contours").style.pointerEvents = "none";
 const contourRenderer = L.canvas({ pane: "contours" });
 const CONTOUR_INFO_TEXT =
-  "Isolines of the field on screen (the A − B difference in compare mode). " +
+  "Isolines of the field on screen (the A − B difference in compare mode), " +
+  "or, with Field set to another variable, of that variable fetched for the " +
+  "same selection — e.g. precipitation contours over shaded temperature; " +
+  "those lines use the single colour and banded fill is off. " +
   "Auto picks about eight evenly spaced levels across the legend range; " +
   "Interval spaces them every N units; Custom takes an explicit list. " +
   "Values are in the selected display units. Lines can share one color or " +
@@ -6274,15 +6279,85 @@ function niceStep(x) {
   return 10 * k;
 }
 
+// ---- contouring another variable over the shaded field
+// contours.var = "" contours the shaded field. Otherwise that variable is
+// fetched for the same selection (experiment, member, statistic, time,
+// level; A − B in compare mode), cached per selection, and contoured on
+// its own grid over the shaded field. The fetch is asynchronous: the
+// first contoursUpdate() for a selection starts it and draws nothing, the
+// completion draws (contoursReady() lets the GIF loop wait for it).
+const contourCache = new Map(); // selection key -> field; small, most recent last
+const CONTOUR_CACHE_MAX = 24;
+const contourPending = { key: "", promise: null };
+function contourVarId() {
+  const v = contours.var;
+  if (!v || !meta || !meta.variables[v] || !currentDisplay || v === currentDisplay.var) return "";
+  return v;
+}
+function contourSelKey(v) {
+  const key = [state.dataset, v, state.experiment, state.member, state.stat, el("month-input").value,
+               meta.variables[v].plev ? state.plev : ""];
+  if (state.compare) key.push("B", state.b.experiment, state.b.member, state.b.stat, el("month-input-b").value);
+  return key.join("|");
+}
+async function contourFetchField(v) {
+  const selA = { experiment: state.experiment, member: state.member, stat: state.stat, time: apiTime(el("month-input").value) };
+  const fa = await fetchField(selA, v);
+  fa._grid = toFloat32(fa.values, fa.nlat, fa.nlon);
+  fa.values = null;
+  if (!state.compare) return fa;
+  const selB = { experiment: state.b.experiment, member: state.b.member, stat: state.b.stat, time: apiTime(el("month-input-b").value) };
+  const fb = await fetchField(selB, v);
+  fb._grid = toFloat32(fb.values, fb.nlat, fb.nlon);
+  const diff = new Float32Array(fa._grid.length);
+  for (let i = 0; i < diff.length; i++) diff[i] = fa._grid[i] - fb._grid[i];
+  return { isDiff: true, var: v, units: fa.units, label: `Δ ${fa.label} (A−B)`, stat: fa.stat,
+           nlat: fa.nlat, nlon: fa.nlon, lat0: fa.lat0, dlat: fa.dlat, lon0: fa.lon0, dlon: fa.dlon, _grid: diff };
+}
+// The field to contour now: {d} when available, {d: null} while another
+// variable's field is still loading (contoursUpdate runs again when it lands).
+function contourDisplay() {
+  const v = contourVarId();
+  if (!v) return { d: currentDisplay };
+  const key = contourSelKey(v);
+  const hit = contourCache.get(key);
+  if (hit) return { d: hit };
+  if (contourPending.key !== key) {
+    contourPending.key = key;
+    contourPending.promise = contourFetchField(v).then((d) => {
+      if (contourPending.key !== key) return; // superseded by a newer selection
+      contourCache.set(key, d);
+      while (contourCache.size > CONTOUR_CACHE_MAX) contourCache.delete(contourCache.keys().next().value);
+      contourPending.key = ""; contourPending.promise = null;
+      contoursUpdate();
+    }).catch((e) => {
+      if (contourPending.key !== key) return;
+      contourPending.key = ""; contourPending.promise = null;
+      contours.levels = [];
+      contoursDraw();
+      contoursSummary(`${contourVarLabel(v)}: ${String(e.message || e)}`);
+    });
+  }
+  return { d: null };
+}
+function contoursReady() { return contourPending.promise || Promise.resolve(); }
+function contourVarLabel(v) {
+  const m = meta && meta.variables[v];
+  return (m && m.label) || v;
+}
+
 // Level spacing in display units for auto/interval modes (null = custom).
-function contourStep(d) {
+// Auto spans the legend for the shaded field and the field's own range
+// for another variable (gmin/gmax, base units).
+function contourStep(d, gmin, gmax) {
   if (contours.mode === "custom") return null;
   if (contours.mode === "interval") {
     const step = parseFloat(contours.interval);
     return step > 0 ? step : NaN;
   }
   const spec = unitSpecFor(d.var);
-  const lo = convForDisplay(d, legendRange.min, spec), hi = convForDisplay(d, legendRange.max, spec);
+  const [bmin, bmax] = d === currentDisplay ? [legendRange.min, legendRange.max] : [gmin, gmax];
+  const lo = convForDisplay(d, bmin, spec), hi = convForDisplay(d, bmax, spec);
   return niceStep(Math.abs(hi - lo) / 8);
 }
 
@@ -6294,7 +6369,7 @@ function contourCustomList() {
 // the fill takes one flat colour — the colormap sampled at the band's
 // midpoint — so the map reads like a classic filled-contour plot.
 function contoursBandedActive() {
-  return contours.on && contours.banded;
+  return contours.on && contours.banded && !contourVarId(); // bands belong to the shaded field
 }
 
 // Level values (base units) strictly inside [lo, hi], on the same grid of
@@ -6376,7 +6451,7 @@ function contourLevelValues(d) {
   const dmax = Math.max(toDisp(vmin), toDisp(vmax));
   let vals = [];
   let note = "";
-  let step = contourStep(d);
+  let step = contourStep(d, vmin, vmax);
   if (step === null) {
     vals = contourCustomList();
     if (!vals.length) note = "type levels as numbers separated by commas";
@@ -6492,7 +6567,8 @@ function contourLink(seg) {
 }
 
 function contourColorFor(value) {
-  if (contours.colorMode !== "value" || !currentLUT) return contours.color;
+  // "by value" samples the shaded field's colour table: meaningless for another variable
+  if (contours.colorMode !== "value" || !currentLUT || contourVarId()) return contours.color;
   const lut = currentLUT;
   let idx = ((value - lut.min) * lut.scale) | 0;
   idx = Math.max(0, Math.min(lut.last, idx));
@@ -6519,16 +6595,24 @@ function contourGeo(lv) {
 }
 
 function contoursUpdate(opts = {}) {
-  const d = currentDisplay;
-  if (d) {
-    const unit = unitSpecFor(d.var).unit;
+  const shaded = currentDisplay;
+  const cv = contourVarId();
+  if (shaded) {
+    const unit = unitSpecFor(cv || shaded.var).unit;
     for (const u of document.querySelectorAll(".contour-unit")) u.textContent = unit;
   }
-  if (!contours.on || !d || !d._grid) {
+  if (!contours.on || !shaded || !shaded._grid) {
     contours.levels = [];
     contoursDraw();
     contoursSummary("");
     if (!opts.noGlobe && globe.open) globeScheduleFull();
+    return;
+  }
+  const { d } = contourDisplay();
+  if (!d) { // another variable's field is on its way
+    contours.levels = [];
+    contoursDraw();
+    contoursSummary(`loading ${contourVarLabel(cv)}…`);
     return;
   }
   const { levels, note } = contourLevelValues(d);
@@ -6546,6 +6630,7 @@ function contoursUpdate(opts = {}) {
   const spec = unitSpecFor(d.var);
   const shown = contours.levels.filter((l) => l.lines.length);
   contoursSummary(
+    (cv ? `${contourVarLabel(cv)}${d.isDiff ? " (A − B)" : ""}: ` : "") +
     (shown.length
       ? `${shown.length} level${shown.length === 1 ? "" : "s"} drawn: ` +
         shown.map((l) => fmtTick(l.display)).join(", ") + ` ${spec.unit}`
@@ -6651,6 +6736,7 @@ function contoursRestore(saved) {
   if (typeof saved.labels === "boolean") contours.labels = saved.labels;
   if (typeof saved.casing === "boolean") contours.casing = saved.casing;
   if (typeof saved.banded === "boolean") contours.banded = saved.banded;
+  if (typeof saved.var === "string" && /^[\w.-]{0,64}$/.test(saved.var)) contours.var = saved.var; // checked against the dataset in use
 }
 
 function contoursSyncUI() {
@@ -6667,8 +6753,35 @@ function contoursSyncUI() {
   el("contour-labels").checked = contours.labels;
   el("contour-casing").checked = contours.casing;
   el("contour-banded").checked = contours.banded;
-  const unit = currentDisplay ? unitSpecFor(currentDisplay.var).unit : "";
+  if (contours.var && !(meta && meta.variables[contours.var])) contours.var = ""; // not in this dataset
+  const sel = el("contour-var");
+  if (sel.options.length < 2 && meta) contoursFillVarSelect();
+  sel.value = contours.var;
+  const other = !!(contours.var && contours.var !== state.var);
+  el("contour-banded").disabled = other;
+  el("contour-banded").parentElement.title = other ? "Banded fill belongs to the shaded field" : "";
+  const byValue = el("contour-color-seg").querySelector('button[data-value="value"]');
+  if (byValue) byValue.disabled = other;
+  const cv = other ? contours.var : state.var;
+  const unit = unitSpecFor(cv).unit;
   for (const u of document.querySelectorAll(".contour-unit")) u.textContent = unit;
+  // Units of the contoured variable, as a choice where the variable has
+  // several (shared with the legend's unit choice when it is the shaded
+  // field): the levels are typed and listed in these.
+  const opts = unitOptionsFor(cv);
+  buildSeg("contour-unit-seg", opts.map((u) => [u.id, u.label]), unitSpecFor(cv).id, (id) => {
+    state.units[cv] = id;
+    if (cv === state.var) { rebuildUnitSeg(); renderMeta(); saveState(); } // the legend follows too
+    else contoursChanged();
+  });
+}
+
+function contoursFillVarSelect() {
+  const sel = el("contour-var");
+  sel.innerHTML = "";
+  const opt = (v, text) => { const o = document.createElement("option"); o.value = v; o.textContent = text; sel.appendChild(o); };
+  opt("", "Shaded field");
+  for (const [k, v] of Object.entries(meta.variables)) opt(k, v.label ? `${v.label} (${k})` : k);
 }
 
 function contoursChanged() {
@@ -6692,6 +6805,7 @@ function contoursInitUI() {
     { single: "All lines in the chosen color.",
       value: "Each line takes the colormap's color at its level (lightened)." });
   el("contour-toggle").addEventListener("change", (e) => { contours.on = e.target.checked; contoursChanged(); });
+  el("contour-var").addEventListener("change", (e) => { contours.var = e.target.value; contoursChanged(); });
   el("contour-interval").addEventListener("change", (e) => { contours.interval = e.target.value.trim(); contoursChanged(); });
   el("contour-custom").addEventListener("change", (e) => { contours.custom = e.target.value.trim(); contoursChanged(); });
   for (const id of ["contour-interval", "contour-custom", "contour-width"]) {
@@ -7623,6 +7737,7 @@ async function gifRun(kind) {
       const painted = gifWaitOverlay();
       renderMeta(); // legend, contours, overlay paint, globe
       await painted;
+      await contoursReady(); // contours of another variable arrive asynchronously
       await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 60)));
       const canvas = kind === "box"
         ? await boxSnapCapture({ maxWidth })

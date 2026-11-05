@@ -277,6 +277,13 @@
     <input type="checkbox" id="contour-toggle" />
   </label>
   <div class="contour-opts" id="contour-opts" hidden>
+    <div class="filter-row">
+      <label class="grow">Field <select id="contour-var" class="grow" title="Which variable to contour: the shaded field, or another variable for the same selection"><option value="">Shaded field</option></select></label>
+    </div>
+    <div class="filter-row">
+      <span>Units</span>
+      <div class="seg contour-units-seg" id="contour-unit-seg" title="Display units of the contoured variable (levels are given in these)"></div>
+    </div>
     <div class="seg" id="contour-mode-seg"></div>
     <div class="filter-row" id="contour-interval-row">
       <label>Every <input type="number" id="contour-interval" step="any" min="0" placeholder="auto" /> <span class="contour-unit"></span></label>
