@@ -159,6 +159,7 @@
     <div class="seg" id="exp-seg"></div>
   </div>
 
+
   <div class="row" id="member-row">
     <span>Member</span>
     <div class="dropdown">
@@ -172,13 +173,32 @@
     <div class="seg" id="stat-seg"></div>
   </div>
 
-  <div class="row">
-    <span><span class="time-word">Month</span> <span class="info-i" id="month-info-a">&#9432;</span></span>
+  <div class="row row-col dim-row" id="init-row" hidden>
+    <span>Initialization <span class="info-i" id="init-info-a">&#9432;</span></span>
+    <div class="dim-line">
+      <button type="button" id="init-prev" title="Previous initialization">&#8249;</button>
+      <input type="range" id="init-range" min="0" max="0" step="1" value="0" />
+      <button type="button" id="init-next" title="Next initialization">&#8250;</button>
+    </div>
+    <span class="dim-readout" id="init-readout"></span>
+    <span class="dim-readout dim-file" id="init-file" title=""></span>
+  </div>
+
+  <div class="row" id="time-row">
+    <span><span class="time-word">Month</span> <span class="info-i" id="month-info-a">&#9432;</span> <span class="lead-readout" id="lead-readout" hidden></span></span>
     <div class="month-controls">
       <button id="prev-month" title="Previous month">&#8249;</button>
       <input type="month" id="month-input" />
+      <input type="date" id="day-input" hidden />
       <button id="next-month" title="Next month">&#8250;</button>
     </div>
+    <div class="seg hour-seg" id="hour-seg" hidden></div>
+    <div class="dim-line step-line" id="step-line" hidden>
+      <button type="button" id="step-prev" title="Previous time step">&#8249;</button>
+      <input type="range" id="step-range" min="0" max="0" step="1" value="0" />
+      <button type="button" id="step-next" title="Next time step">&#8250;</button>
+    </div>
+    <span class="dim-readout" id="step-readout" hidden></span>
   </div>
 
   <label class="row">
@@ -194,6 +214,7 @@
       <div class="seg" id="exp-seg-b"></div>
     </div>
 
+
     <div class="row" id="member-row-b">
       <span>Member</span>
       <div class="dropdown">
@@ -207,13 +228,32 @@
       <div class="seg" id="stat-seg-b"></div>
     </div>
 
-    <div class="row">
-      <span><span class="time-word">Month</span> <span class="info-i" id="month-info-b">&#9432;</span></span>
+    <div class="row row-col dim-row" id="init-row-b" hidden>
+      <span>Initialization</span>
+      <div class="dim-line">
+        <button type="button" id="init-prev-b" title="Previous initialization">&#8249;</button>
+        <input type="range" id="init-range-b" min="0" max="0" step="1" value="0" />
+        <button type="button" id="init-next-b" title="Next initialization">&#8250;</button>
+      </div>
+      <span class="dim-readout" id="init-readout-b"></span>
+      <span class="dim-readout dim-file" id="init-file-b" title=""></span>
+    </div>
+
+    <div class="row" id="time-row-b">
+      <span><span class="time-word">Month</span> <span class="info-i" id="month-info-b">&#9432;</span> <span class="lead-readout" id="lead-readout-b" hidden></span></span>
       <div class="month-controls">
         <button id="prev-month-b" title="Previous month">&#8249;</button>
         <input type="month" id="month-input-b" />
+        <input type="date" id="day-input-b" hidden />
         <button id="next-month-b" title="Next month">&#8250;</button>
       </div>
+      <div class="seg hour-seg" id="hour-seg-b" hidden></div>
+      <div class="dim-line step-line" id="step-line-b" hidden>
+        <button type="button" id="step-prev-b" title="Previous time step">&#8249;</button>
+        <input type="range" id="step-range-b" min="0" max="0" step="1" value="0" />
+        <button type="button" id="step-next-b" title="Next time step">&#8250;</button>
+      </div>
+      <span class="dim-readout" id="step-readout-b" hidden></span>
     </div>
   </div>
 

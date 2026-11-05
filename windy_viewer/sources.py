@@ -506,6 +506,140 @@ class CatalogSource(Source):
         return g
 
 
+# ---------------------------------------------------------------- forecast catalog
+class ForecastSource(CatalogSource):
+    """A store built by ``tools/fcst_catalog.py``: one Icechunk group per
+    variable and initialisation, ``<var>/i<YYYYMMDD>``, dimensions
+    ``(member, time, lat, lon)`` in valid time. Every initialisation is an
+    "experiment" of the viewer, so the endpoints work unchanged; the
+    frontend shows them as an init picker instead of buttons.
+
+    Config::
+        {"id": "spear_fcst", "type": "forecast", "path": "/path/to/catalog", "title": "..."}
+    """
+
+    kind = "forecast"
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        if self.catalog.get("kind") != "forecast":
+            raise ValueError(f"{self.path}: not a forecast catalog (kind={self.catalog.get('kind')!r})")
+        self.max_steps = int(self.catalog.get("max_steps") or 0)
+        self.frequency = self.catalog.get("frequency") or "6hr"
+
+    def _group(self, key: str) -> xr.Dataset:  # key = "<var>/<init>"
+        var = key.split("/")[0]
+        with self._lock:
+            if key not in self._datasets:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    ds = xr.open_zarr(self._store(), group=key, consolidated=False, decode_timedelta=False)
+                ds = _normalise_grid(ds)
+                attrs = (self.catalog["variables"].get(var) or {}).get("attrs") or {}
+                v = ds[var].variable
+                fills = {k: attrs[k] for k in ("_FillValue", "missing_value") if attrs.get(k) is not None}
+                if fills and np.issubdtype(v.dtype, np.floating) and "_FillValue" not in v.encoding:
+                    v = v.copy(deep=False)
+                    v.attrs.update({k: v.dtype.type(fv) for k, fv in fills.items()})
+                    ds[var] = xr.conventions.decode_cf_variable(var, v, mask_and_scale=True, decode_times=False)
+                self._datasets[key] = ds
+            return self._datasets[key]
+
+    def _load(self):
+        cat = self.catalog
+        overrides = self.cfg.get("variables") or {}
+        for name, v in cat["variables"].items():
+            extra = [d for d in v["dims"] if d not in AUX_DIMS and d not in LEVEL_DIMS]
+            if extra and not self.ensemble_dim:
+                self.ensemble_dim = extra[0]
+            self.variables[name] = _var_entry(name, v.get("attrs", {}), v["dims"], None, v.get("realm") or "atmos",
+                                              v["start"], v["end"], overrides.get(name),
+                                              frequency=v.get("frequency") or self.frequency)
+            self.variables[name]["missing_months"] = []
+            self.variables[name]["inits"] = v.get("inits", [])
+        self.ensemble_dim = self.ensemble_dim or "member"
+        self.members = [str(m) for m in cat.get("members") or []]
+        self.calendar = str(cat.get("calendar") or "standard").lower()
+        g = cat.get("grid") or {}
+        self.grid_text = (f"{g.get('nlat')} lat x {g.get('nlon')} lon"
+                          + (f" ({g['dlat']:.3g} x {g['dlon']:.3g} deg)" if g.get("dlat") and g.get("dlon") else "")
+                          + ", longitudes 0-360")
+        freq_word = {"6hr": "6-hourly", "3hr": "3-hourly", "12hr": "12-hourly", "1hr": "hourly",
+                     "day": "daily", "month": "monthly"}.get(self.frequency, self.frequency)
+        for iid, i in cat["inits"].items():
+            self.experiments[iid] = {
+                "start": i["start"], "end": i["end"], "short": i["init"],
+                "init": i["init"], "variant": i["variant"], "members": i["members"],
+                "dir": Path(i.get("dir") or "").name, "dir_path": i.get("dir") or "",
+                "n_times": i["n_times"], "variables": i.get("variables", []),
+                "long": (f"Forecast initialised {i['init']}"
+                         + (f" ({i['variant']} run)" if i["variant"] != "base" else "")
+                         + f" — {len(i['members'])} member(s): {', '.join(i['members'])}; "
+                         f"{freq_word} {i['start']} to {i['end']} ({i['n_times']} steps)"),
+            }
+        self.experiments = dict(sorted(self.experiments.items(), key=lambda kv: kv[1]["init"]))
+
+    def meta(self) -> dict:
+        m = super().meta()
+        m["forecast"] = {"frequency": self.frequency, "max_steps": self.max_steps,
+                         "n_inits": len(self.experiments)}
+        return m
+
+    def open(self, experiment, var):
+        self.ensure()
+        if experiment not in self.experiments:
+            raise KeyError(experiment)
+        self.var_cfg(var)
+        if var not in self.experiments[experiment].get("variables", [var]):
+            raise KeyError(var)
+        return self._group(f"{var}/{experiment}")
+
+    # the member count differs per initialisation, so the statistic texts
+    # do not quote one (downloads list the members in forecast_members)
+    def stat_text(self, stat: str, member: str | None) -> str:
+        return {
+            "raw": f"member {member}",
+            "mean": "ensemble mean of the initialisation's members",
+            "spread": "ensemble spread (standard deviation, ddof=1, across the initialisation's members)",
+            "anom": f"deviation: member {member} minus the ensemble mean of the initialisation's members",
+        }[stat]
+
+    def stat_long_name(self, stat: str, member: str | None, long: str) -> str:
+        return {
+            "spread": f"ensemble standard deviation (ddof=1) of {long}",
+            "anom": f"member {member} minus ensemble mean of {long}",
+            "mean": f"ensemble mean of {long}",
+        }.get(stat, long)
+
+    def source_files(self, experiment: str, var: str) -> dict:
+        """{member: path} of the NetCDF files behind one (variable, init) group."""
+        self.ensure()
+        grp = (self.catalog.get("groups") or {}).get(f"{var}/{experiment}") or {}
+        files = grp.get("files") or {}
+        return {m: (rec[0] if isinstance(rec, list) else str(rec)) for m, rec in files.items()}
+
+    def experiment_attrs(self, experiment: str) -> dict:
+        e = self.experiments.get(experiment) or {}
+        return {"experiment_id": experiment,
+                "experiment": f"forecast initialised {e.get('init')} ({e.get('variant')} run)",
+                "forcing": ""}
+
+    def download_attrs(self, experiment, var, include_experiment=True):
+        g = dict(self.catalog.get("global_attrs") or {})
+        g.pop("filename", None)
+        if "history" in g:
+            g["source_history"] = g.pop("history")
+        e = self.experiments.get(experiment) or {}
+        grp = (self.catalog.get("groups") or {}).get(f"{var}/{experiment}") or {}
+        g["source_files"] = (f"{len(grp.get('members', []))} NetCDF file(s), one per member, under "
+                             f"{e.get('dir') or ', '.join(self.catalog['roots'])}")
+        if include_experiment:
+            g["forecast_init"] = e.get("init", "")
+            g["forecast_variant"] = e.get("variant", "")
+            g["forecast_members"] = ", ".join(e.get("members", []))
+        return g
+
+
 def _normalise_grid(ds: xr.Dataset) -> xr.Dataset:
     """Ascending lat, 0..360 lon, 'lat'/'lon' names — what the endpoints assume."""
     ren = {}
@@ -583,7 +717,7 @@ SPEAR_DEFAULT = {
     ),
 }
 
-_KINDS = {"arraylake": ArrayLakeSource, "catalog": CatalogSource}
+_KINDS = {"arraylake": ArrayLakeSource, "catalog": CatalogSource, "forecast": ForecastSource}
 
 
 def load_sources() -> dict[str, Source]:

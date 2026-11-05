@@ -1976,6 +1976,7 @@ function heavyStatLabel() {
 }
 
 function showHeavyOverlay(seq, kind) {
+  if (seq !== loadSeq) return; // stale timer
   heavyOverlay.seq = seq;
   heavyOverlay.kind = kind;
   heavyOverlay.t0 = performance.now();
@@ -1997,6 +1998,7 @@ function showHeavyOverlay(seq, kind) {
 // still take seconds on a cache miss, and a greyed screen with a spinner
 // beats looking frozen. Shares the heavyOverlay delay/seq machinery.
 function showPlainOverlay(seq) {
+  if (seq !== loadSeq) return; // stale timer
   heavyOverlay.seq = seq;
   heavyOverlay.kind = null; // no percent estimate, no EMA timing update
   heavyOverlay.t0 = performance.now();
@@ -2034,6 +2036,7 @@ async function loadField() {
   }
   const seq = ++loadSeq;
   saveState();
+  if (isForecast()) { updateSourceFileNote("a"); if (state.compare) updateSourceFileNote("b"); }
   boxRefresh(); // the box card mirrors the selection it will extract
   gifRefreshNote(); // and the GIF card's frame count
   const selA = {
@@ -2061,6 +2064,7 @@ async function loadField() {
   // Grey out the whole UI with the progress overlay, but only if the load
   // is actually slow (a cache hit finishes before the 700 ms delay fires).
   let ok = false;
+  clearTimeout(heavyOverlay.delay); // a superseded load's pending overlay must not surface later
   if (heavy) {
     heavyOverlay.delay = setTimeout(() => showHeavyOverlay(seq, heavyKind), 700);
   } else {
@@ -2335,7 +2339,24 @@ function timeFreq() {
   const v = meta && meta.variables[state.var];
   return (v && v.frequency) || "month";
 }
+// Sub-daily data ("6hr", "3hr", ...): the time pickers become datetime
+// inputs stepping by the data's interval; time strings are "YYYY-MM-DDTHH".
+const SUBDAILY_HOURS = { "1hr": 1, "3hr": 3, "6hr": 6, "12hr": 12 };
+function stepHours() { return SUBDAILY_HOURS[timeFreq()] || 0; }
+function isSubdaily() { return stepHours() > 0; }
+function isForecast() { return !!(meta && meta.kind === "forecast"); }
 function toMonthStr(t) { return (t || "").slice(0, 7); }
+// "YYYY-MM", "YYYY-MM-DD" or "YYYY-MM-DDTHH[:MM]" -> "YYYY-MM-DDTHH:MM" (what a
+// datetime-local input holds); a range end lands on the period's last hour.
+function toHourStr(t, end) {
+  if (!t) return "";
+  if (t.length >= 16) return t.slice(0, 16);
+  if (t.length >= 13) return `${t.slice(0, 13)}:00`;
+  const day = toDayStr(t, end);
+  return `${day}T${end ? "23:59" : "00:00"}`;
+}
+// time string as sent to the API / used in file names: minutes dropped
+function apiTime(t) { return (t || "").length > 13 && (t || "").includes("T") ? t.slice(0, 13) : (t || ""); }
 function toDayStr(t, end) {
   if (!t) return "";
   if (t.length >= 10) return t.slice(0, 10);
@@ -2344,22 +2365,83 @@ function toDayStr(t, end) {
   return `${t}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, "0")}`;
 }
 // `t` in the form the input expects (date inputs reject "YYYY-MM").
-function fitTime(t, input, end) { return input.type === "date" ? toDayStr(t, end) : toMonthStr(t); }
+function fitTime(t, input, end) {
+  if (input.type === "datetime-local") return toHourStr(t, end);
+  return input.type === "date" ? toDayStr(t, end) : toMonthStr(t);
+}
+
+// Hours of the day the data falls on ("03","09","15","21" for 6-hourly
+// means starting at 03), from the experiment's first time; null when there
+// are too many for a button row (hourly data).
+function hourChoices(experiment) {
+  const e = meta && meta.experiments[experiment], step = stepHours();
+  if (!e || !step || 24 / step > 8) return null;
+  const h0 = +toHourStr(e.start).slice(11, 13);
+  const out = [];
+  for (let k = 0; k < 24 / step; k++) out.push(String((h0 + k * step) % 24).padStart(2, "0"));
+  return out.sort();
+}
+// Visible sub-daily controls (day picker + hour buttons) follow the hidden
+// datetime value; called wherever that value changes.
+function syncSubdailyControls() {
+  for (const [id, dayId, segId, exp] of [["month-input", "day-input", "hour-seg", state.experiment],
+                                          ["month-input-b", "day-input-b", "hour-seg-b", state.b.experiment]]) {
+    const input = el(id), day = el(dayId), seg = el(segId);
+    const choices = isSubdaily() ? hourChoices(exp) : null;
+    const split = !!choices;
+    input.hidden = split;
+    day.hidden = !split;
+    seg.hidden = !split;
+    if (!split) continue;
+    const v = toHourStr(input.value);
+    day.value = v.slice(0, 10);
+    day.min = toHourStr(input.min).slice(0, 10);
+    day.max = toHourStr(input.max).slice(0, 10);
+    const hour = v.slice(11, 13);
+    const have = [...seg.querySelectorAll("button")].map((b) => b.dataset.value).join(",");
+    if (have !== choices.join(",")) {
+      buildSeg(segId, choices.map((h) => [h, `${h} UTC`]), hour, (h) => setSubdailyTime(id, dayId, h));
+    } else {
+      seg.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.value === hour));
+    }
+  }
+}
+// Day picker or hour button changed: write the hidden datetime value
+// (clamped to the forecast window) and load.
+function setSubdailyTime(id, dayId, hour) {
+  const input = el(id), day = el(dayId);
+  if (!day.value) return;
+  const h = hour || (toHourStr(input.value).slice(11, 13) || "00");
+  let v = `${day.value}T${h}:00`;
+  if (input.min && v < input.min) v = input.min;
+  if (input.max && v > input.max) v = input.max;
+  input.value = v;
+  updateLeadReadout();
+  loadField();
+}
 
 function syncTimeInputs() {
   const freq = timeFreq();
   const daily = freq === "day";
+  const sub = isSubdaily();
   for (const [id, exp] of [["month-input", state.experiment], ["month-input-b", state.b.experiment]]) {
     const input = el(id);
-    const type = daily ? "date" : "month";
+    const type = sub ? "datetime-local" : daily ? "date" : "month";
     if (input.type !== type) {
       const old = input.value;
       input.type = type;
       input.value = fitTime(old, input);
     }
+    if (sub) input.step = String(stepHours() * 3600); else input.removeAttribute("step");
     applyExperimentRange(id, exp);
   }
-  document.querySelectorAll(".time-word").forEach((w) => (w.textContent = daily ? "Day" : "Month"));
+  document.querySelectorAll(".time-word").forEach((w) => (w.textContent = sub ? "Time" : daily ? "Day" : "Month"));
+  el("time-row").classList.toggle("time-sub", sub);
+  el("time-row-b").classList.toggle("time-sub", sub);
+  for (const [id, btn] of [["prev-month", "Previous"], ["next-month", "Next"], ["prev-month-b", "Previous"], ["next-month-b", "Next"]]) {
+    el(id).title = `${btn} ${sub || daily ? "day" : "month"}`;
+  }
+  updateLeadReadout();
   // "Play year" and its 12-month strip only make sense for monthly data
   const monthly = freq === "month";
   if (!monthly && playback.frames) pausePlayback();
@@ -2372,7 +2454,13 @@ function stepMonth(inputId, delta) {
   const input = el(inputId);
   const [y, m, d0] = input.value.split("-").map(Number);
   let next;
-  if (input.type === "date") {
+  if (input.type === "datetime-local") {
+    // arrows step a day at the same hour; the hour buttons move within the day
+    const d = new Date(`${toHourStr(input.value)}:00Z`);
+    if (Number.isNaN(d.getTime())) return;
+    d.setUTCDate(d.getUTCDate() + delta);
+    next = d.toISOString().slice(0, 16);
+  } else if (input.type === "date") {
     const d = new Date(Date.UTC(y, m - 1, (d0 || 1) + delta));
     next = d.toISOString().slice(0, 10);
   } else {
@@ -2381,6 +2469,7 @@ function stepMonth(inputId, delta) {
   }
   if (next < input.min || next > input.max) return;
   input.value = next;
+  updateLeadReadout();
   loadField();
 }
 
@@ -2391,6 +2480,177 @@ function applyExperimentRange(inputId, experiment) {
   input.max = fitTime(exp.end, input, true);
   if (input.value < input.min || input.value > input.max) input.value = input.min;
 }
+
+// Forecast datasets: lead time of the selected valid time, shown beside
+// the time input ("+12 d 06 h" after the initialization at 00 UTC).
+function leadHours(time, experiment) {
+  const e = meta && meta.experiments[experiment];
+  if (!e || !e.init || !time) return null;
+  const t = new Date(`${toHourStr(time)}:00Z`), t0 = new Date(`${e.init}T00:00:00Z`);
+  if (Number.isNaN(t.getTime()) || Number.isNaN(t0.getTime())) return null;
+  return Math.round((t - t0) / 3600000);
+}
+function leadText(h) {
+  if (h == null) return "";
+  const sign = h < 0 ? "−" : "+", a = Math.abs(h);
+  return `${sign}${Math.floor(a / 24)} d ${String(a % 24).padStart(2, "0")} h`;
+}
+function updateLeadReadout() {
+  if (isForecast()) syncDimSliders();
+  syncSubdailyControls();
+  for (const [rid, iid, exp] of [["lead-readout", "month-input", state.experiment],
+                                  ["lead-readout-b", "month-input-b", state.b.experiment]]) {
+    const r = el(rid);
+    if (!r) continue;
+    const show = isForecast();
+    r.hidden = !show;
+    if (show) {
+      const h = leadHours(el(iid).value, exp);
+      r.textContent = leadText(h);
+      r.title = h == null ? "" : `lead time: ${h} h after the ${meta.experiments[exp].init} initialization`;
+    }
+  }
+}
+
+// Forecast navigation, ncview-style: one slider per axis. The
+// initialization slider runs over every forecast in date order and keeps
+// the time-step index (= the lead) when moved; the step slider runs over
+// the steps of the current forecast and is the same thing as the date
+// picker and hour buttons above it (they all set the hidden time value).
+function initIds() { return Object.keys(meta.experiments); }
+function initReadoutText(k) {
+  const e = meta.experiments[k];
+  if (!e) return "";
+  return `${e.dir || e.init} · ${e.members.length} member${e.members.length === 1 ? "" : "s"} available`;
+}
+// The NetCDF file behind the current variable, initialization and member,
+// fetched lazily and shown under the initialization readout.
+const _fileNoteSeq = { a: 0, b: 0 };
+async function updateSourceFileNote(side) {
+  const sfx = side === "b" ? "-b" : "";
+  const node = el(`init-file${sfx}`);
+  if (!node || !isForecast()) return;
+  const exp = side === "b" ? state.b.experiment : state.experiment;
+  const member = side === "b" ? state.b.member : state.member;
+  const stat = side === "b" ? state.b.stat : state.stat;
+  const seq = ++_fileNoteSeq[side];
+  try {
+    const q = new URLSearchParams({ dataset: state.dataset, experiment: exp, var: state.var });
+    const r = await fetchJSON(`${API}/api/forecast/files?${q}`);
+    if (seq !== _fileNoteSeq[side]) return;
+    const files = r.files || {};
+    const all = stat === "mean" || stat === "spread";
+    const path = all ? null : files[member];
+    const shown = all ? `${Object.keys(files).length} files (one per member) in ${r.dir}` : (path || `no file for member ${member}`);
+    node.textContent = shown;
+    node.title = all ? Object.values(files).join("\n") : (path || "");
+  } catch (e) {
+    if (seq === _fileNoteSeq[side]) { node.textContent = ""; node.title = ""; }
+  }
+}
+// How far apart the initializations are, in months (median gap), and how
+// long a forecast runs, from the metadata — the info text adapts to the dataset.
+function initSpacingText() {
+  const ids = initIds();
+  const gaps = [];
+  for (let i = 1; i < ids.length; i++) {
+    const a = meta.experiments[ids[i - 1]].init, b = meta.experiments[ids[i]].init;
+    gaps.push((+b.slice(0, 4) - +a.slice(0, 4)) * 12 + (+b.slice(5, 7) - +a.slice(5, 7)));
+  }
+  if (!gaps.length) return "";
+  gaps.sort((x, y) => x - y);
+  const g = gaps[Math.floor(gaps.length / 2)];
+  return g === 1 ? "monthly" : g === 12 ? "yearly" : g > 0 ? `every ${g} months` : "";
+}
+function forecastLengthText(k) {
+  const e = meta.experiments[k];
+  const days = (e.n_times * stepHours()) / 24;
+  return days >= 360 && days <= 370 ? "one year" : days >= 28 ? `${Math.round(days)} days` : `${e.n_times} steps`;
+}
+function applyInit(side, k) {
+  if (side === "b") state.b.experiment = k; else state.experiment = k;
+  syncMembersToInit(side);
+  if (side !== "b") { tsRange.start = ""; tsSetRangeDefaults(); }
+}
+// step index of `time` within the experiment's window (0-based), or null
+function stepIndexOf(time, experiment) {
+  const e = meta.experiments[experiment], h = stepHours();
+  if (!e || !h || !time) return null;
+  const t = Date.parse(`${toHourStr(time)}:00Z`), t0 = Date.parse(`${toHourStr(e.start)}:00Z`);
+  if (Number.isNaN(t) || Number.isNaN(t0)) return null;
+  return Math.round((t - t0) / (h * 3600000));
+}
+function timeAtStep(experiment, i) {
+  const e = meta.experiments[experiment];
+  const d = new Date(`${toHourStr(e.start)}:00Z`);
+  d.setUTCHours(d.getUTCHours() + Math.max(0, Math.min(e.n_times - 1, i)) * stepHours());
+  return d.toISOString().slice(0, 16);
+}
+// Move one side to another initialization, keeping the step index.
+function gotoInit(side, k) {
+  const inputId = side === "b" ? "month-input-b" : "month-input";
+  const cur = side === "b" ? state.b.experiment : state.experiment;
+  if (!k || k === cur) return;
+  const input = el(inputId);
+  const i = stepIndexOf(input.value, cur) ?? 0;
+  applyInit(side, k);
+  applyExperimentRange(inputId, k);
+  input.value = fitTime(timeAtStep(k, i), input);
+  updateLeadReadout();
+  loadField();
+}
+function gotoStep(side, i) {
+  const inputId = side === "b" ? "month-input-b" : "month-input";
+  const cur = side === "b" ? state.b.experiment : state.experiment;
+  const input = el(inputId);
+  const v = fitTime(timeAtStep(cur, i), input);
+  if (v === input.value) return;
+  input.value = v;
+  updateLeadReadout();
+  loadField();
+}
+// Set both sliders from the current state (called on every change).
+function syncDimSliders() {
+  const ids = initIds();
+  for (const side of ["a", "b"]) {
+    const sfx = side === "b" ? "-b" : "";
+    const cur = side === "b" ? state.b.experiment : state.experiment;
+    const e = meta.experiments[cur];
+    const time = el(`month-input${sfx}`).value;
+    const ir = el(`init-range${sfx}`), sr = el(`step-range${sfx}`);
+    ir.max = String(Math.max(0, ids.length - 1));
+    ir.value = String(Math.max(0, ids.indexOf(cur)));
+    el(`init-readout${sfx}`).textContent = `${initReadoutText(cur)} · ${ids.indexOf(cur) + 1} of ${ids.length}`;
+    updateSourceFileNote(side);
+    const n = (e && e.n_times) || 1;
+    sr.max = String(n - 1);
+    const i = stepIndexOf(time, cur) ?? 0;
+    sr.value = String(i);
+    el(`step-line${sfx}`).hidden = false;
+    const ro = el(`step-readout${sfx}`);
+    ro.hidden = false;
+    ro.textContent = `step ${i + 1} of ${n} · ${t13(time).replace("T", " ")} UTC · lead ${leadText(leadHours(time, cur))}`;
+    if (!ir.dataset.wired) {
+      ir.dataset.wired = "1";
+      ir.addEventListener("input", () => {        // live readout while dragging
+        const k = initIds()[+ir.value];
+        if (k) el(`init-readout${sfx}`).textContent = `${initReadoutText(k)} · ${+ir.value + 1} of ${initIds().length}`;
+      });
+      ir.addEventListener("change", () => gotoInit(side, initIds()[+ir.value]));
+      el(`init-prev${sfx}`).addEventListener("click", () => gotoInit(side, initIds()[Math.max(0, +ir.value - 1)]));
+      el(`init-next${sfx}`).addEventListener("click", () => gotoInit(side, initIds()[Math.min(initIds().length - 1, +ir.value + 1)]));
+      sr.addEventListener("input", () => {
+        const c = side === "b" ? state.b.experiment : state.experiment;
+        const t = timeAtStep(c, +sr.value);
+        ro.textContent = `step ${+sr.value + 1} of ${sr.max | 0 + 1} · ${t13(t).replace("T", " ")} UTC · lead ${leadText(leadHours(t, c))}`;
+      });
+      sr.addEventListener("change", () => gotoStep(side, +sr.value));
+      el(`step-prev${sfx}`).addEventListener("click", () => gotoStep(side, +sr.value - 1));
+      el(`step-next${sfx}`).addEventListener("click", () => gotoStep(side, +sr.value + 1));
+    }
+  }
+}
+function t13(v) { return toHourStr(v).slice(0, 13); }
 
 function buildSeg(containerId, entries, current, onPick, infos) {
   const div = el(containerId);
@@ -2422,8 +2682,40 @@ function buildSeg(containerId, entries, current, onPick, infos) {
   }
 }
 
+// Members available to a side: a forecast initialization's own members,
+// otherwise the dataset's.
+function sideMembers(side) {
+  const exp = side === "b" ? state.b.experiment : state.experiment;
+  const e = meta && meta.experiments[exp];
+  return (isForecast() && e && e.members && e.members.length) ? e.members : meta.members;
+}
+// After an initialization change: refill that side's member list and
+// keep the selection valid for the new member set.
+function syncMembersToInit(side) {
+  const members = sideMembers(side);
+  const sel = side === "b" ? state.b : state;
+  if (!members.includes(sel.member)) sel.member = members[0] || "";
+  if (side === "b") {
+    fillMemberList("member-list-b", members, () => state.b.member, (m) => (state.b.member = m));
+  } else {
+    fillMemberList("member-list", members, () => state.member, (m) => (state.member = m));
+  }
+  updateControlStates();
+}
 function buildMemberDropdown(btnId, listId, members, getMember, setMember) {
   const btn = el(btnId);
+  const list = el(listId);
+  fillMemberList(listId, members, getMember, setMember);
+  btn.addEventListener("click", (e) => {
+    if (btn.disabled) return;
+    e.stopPropagation();
+    document.querySelectorAll(".dd-list").forEach((l) => {
+      if (l !== list) l.hidden = true;
+    });
+    list.hidden = !list.hidden;
+  });
+}
+function fillMemberList(listId, members, getMember, setMember) {
   const list = el(listId);
   list.innerHTML = "";
   for (const m of members) {
@@ -2441,14 +2733,6 @@ function buildMemberDropdown(btnId, listId, members, getMember, setMember) {
     });
     list.appendChild(item);
   }
-  btn.addEventListener("click", (e) => {
-    if (btn.disabled) return;
-    e.stopPropagation();
-    document.querySelectorAll(".dd-list").forEach((l) => {
-      if (l !== list) l.hidden = true;
-    });
-    list.hidden = !list.hidden;
-  });
 }
 
 document.addEventListener("click", () =>
@@ -2467,7 +2751,7 @@ function rebuildUnitSeg() {
 function memberBtnState(btn, stat, member) {
   // Member is meaningful for Member & Deviation; greyed for Mean & Spread.
   btn.disabled = stat === "mean" || stat === "spread";
-  const n = meta ? meta.n_members : "";
+  const n = meta ? (isForecast() ? sideMembers(btn.id.endsWith("-b") ? "b" : "a").length : meta.n_members) : "";
   btn.textContent =
     stat === "mean" ? `ensemble mean (${n})` :
     stat === "spread" ? `ensemble spread (${n})` : member;
@@ -2815,7 +3099,9 @@ async function init() {
   state.b.member = meta.members[1] || meta.members[0] || "";
   state.plev = meta.levels.includes(500) ? 500 : (meta.levels[0] || 500);
   // rows that make no sense for this dataset
-  el("exp-row").hidden = el("exp-row-b").hidden = Object.keys(meta.experiments).length < 2;
+  const fcst = isForecast();
+  el("exp-row").hidden = el("exp-row-b").hidden = fcst || Object.keys(meta.experiments).length < 2;
+  el("init-row").hidden = el("init-row-b").hidden = !fcst;
   el("member-row").hidden = el("member-row-b").hidden = !meta.ensemble;
   el("stat-row").hidden = el("stat-row-b").hidden = !meta.ensemble;
   el("wind-row").hidden = !(meta.wind && (meta.wind.sfc || meta.wind.plev));
@@ -2856,6 +3142,25 @@ async function init() {
   buildVarButtons();
   rebuildUnitSeg();
   buildPlevDropdown();
+  if (fcst) {
+    const f = meta.forecast || {};
+    const ids = initIds();
+    const initInfo = () => {
+      const cur = state.experiment, e = meta.experiments[cur];
+      const spacing = initSpacingText();
+      return `${meta.title}: ${ids.length} forecasts, initialized ${spacing ? spacing + " " : ""}from ` +
+        `${meta.experiments[ids[0]].init} to ${meta.experiments[ids[ids.length - 1]].init}, each running ` +
+        `${forecastLengthText(cur)} (${e.n_times} ${timeFreq()} steps) from its initialization.\n\n` +
+        `Selected: ${e.dir || cur}\n${e.dir_path || ""}\nmembers available: ${e.members.join(", ")}` +
+        `${e.variant && e.variant !== "base" ? `\n(${e.variant} directory)` : ""}\n\n` +
+        `Initialization slider: which forecast; moving it keeps the time step, i.e. the lead. ` +
+        `Time: the date picker, hour buttons and step slider all move within the forecast's window; ` +
+        `the lead beside "Time" is hours since initialization. Ensemble statistics use the members ` +
+        `available in the selected forecast; the file line shows the NetCDF file behind the current ` +
+        `variable and member.`;
+    };
+    el("init-info-a").addEventListener("click", (e) => { e.stopPropagation(); showInfoPopover(initInfo(), e.clientX, e.clientY); });
+  } else {
   buildSeg(
     "exp-seg",
     Object.keys(meta.experiments).map((k) => [k, expShort(k)]),
@@ -2883,9 +3188,12 @@ async function init() {
     },
     expInfos
   );
-  buildMemberDropdown("member-btn", "member-list", meta.members,
+  }
+  if (!sideMembers("a").includes(state.member)) state.member = sideMembers("a")[0] || "";
+  if (!sideMembers("b").includes(state.b.member)) state.b.member = sideMembers("b")[0] || "";
+  buildMemberDropdown("member-btn", "member-list", sideMembers("a"),
     () => state.member, (m) => (state.member = m));
-  buildMemberDropdown("member-btn-b", "member-list-b", meta.members,
+  buildMemberDropdown("member-btn-b", "member-list-b", sideMembers("b"),
     () => state.b.member, (m) => (state.b.member = m));
 
   syncTimeInputs(); // picker types follow the variable's frequency
@@ -2903,6 +3211,7 @@ async function init() {
   }
   applyExperimentRange("month-input", state.experiment);
   applyExperimentRange("month-input-b", state.b.experiment);
+  updateLeadReadout();
   if (SAVED && SAVED.opacity != null) el("opacity").value = SAVED.opacity;
   if (SAVED && SAVED.particles != null) el("particles-toggle").checked = SAVED.particles;
   if (SAVED && SAVED.cells != null) state.cells = !!SAVED.cells;
@@ -2918,12 +3227,13 @@ async function init() {
   }
 
   const STAT_OPTS = [["raw", "Member"], ["mean", "Mean"], ["spread", "Spread"], ["anom", "Deviation"]];
-  const N = meta.n_members;
+  const N = isForecast() ? "the initialization's" : `all ${meta.n_members}`;
+  const Nm = isForecast() ? "" : `${meta.n_members}-member `;
   const STAT_INFO = {
     raw: "Single ensemble member — one physically consistent realization of the climate (choose which member below).",
-    mean: `Ensemble mean — the average of all ${N} members; averages out internal variability to isolate the forced signal.`,
-    spread: `Ensemble spread — the standard deviation across the ${N} members (sample std, N−1); maps where internal variability is largest.`,
-    anom: `Ensemble deviation — the selected member minus the ${N}-member ensemble mean; shows how far that member departs from the forced signal due to internal variability.`,
+    mean: `Ensemble mean — the average of ${N} members; averages out internal variability to isolate the forced signal.`,
+    spread: `Ensemble spread — the standard deviation across ${N} members (sample std, N−1); maps where internal variability is largest.`,
+    anom: `Ensemble deviation — the selected member minus the ${Nm}ensemble mean; shows how far that member departs from the forced signal due to internal variability.`,
   };
   buildSeg("stat-seg", STAT_OPTS, state.stat, (v) => {
     state.stat = v;
@@ -2942,6 +3252,11 @@ async function init() {
   // with the side's currently selected scenario highlighted.
   const monthInfoText = (side) => {
     const cur = side === "b" ? state.b.experiment : state.experiment;
+    if (isForecast()) {
+      const e = meta.experiments[cur];
+      return `Forecast initialized ${e.init}${e.variant !== "base" ? ` (${e.variant})` : ""}:\n` +
+        `${e.start} to ${e.end} (${e.n_times} steps of ${timeFreq()})\nmembers: ${e.members.join(", ")}`;
+    }
     return (
       "Available months:\n" +
       Object.entries(meta.experiments)
@@ -2959,8 +3274,10 @@ async function init() {
     el(id).addEventListener("mouseenter", () => { el(id).title = monthInfoText(side); });
   }
 
-  el("month-input").addEventListener("change", loadField);
-  el("month-input-b").addEventListener("change", loadField);
+  el("month-input").addEventListener("change", () => { updateLeadReadout(); loadField(); });
+  el("month-input-b").addEventListener("change", () => { updateLeadReadout(); loadField(); });
+  el("day-input").addEventListener("change", () => setSubdailyTime("month-input", "day-input"));
+  el("day-input-b").addEventListener("change", () => setSubdailyTime("month-input-b", "day-input-b"));
   el("prev-month").addEventListener("click", () => stepMonth("month-input", -1));
   el("next-month").addEventListener("click", () => stepMonth("month-input", 1));
   el("prev-month-b").addEventListener("click", () => stepMonth("month-input-b", -1));
@@ -6510,7 +6827,7 @@ function snapColorbar(ctx, legend, x, top, imgH, k = 1) {
 
 function snapStem() {
   const d = currentDisplay;
-  const time = el("month-input").value || "";
+  const time = apiTime(el("month-input").value) || "";
   const ds = state.dataset || "view";
   if (!d) return `${ds}_view_${time}`;
   const statTok = meta && meta.ensemble
@@ -6719,11 +7036,16 @@ function gifDelay() {
 // null if it doesn't parse.
 function gifParseTime(v, isEnd) {
   v = (v || "").trim();
-  let y, m, d;
+  let y, m, d, h;
   if (/^\d{4}$/.test(v)) { y = v; m = isEnd ? "12" : "01"; }
   else if (/^\d{4}-(0[1-9]|1[0-2])$/.test(v)) { [y, m] = v.split("-"); }
   else if (/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(v)) { [y, m, d] = v.split("-"); }
+  else if (/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3])(:\d{2})?$/.test(v)) { [y, m, d] = v.slice(0, 10).split("-"); h = v.slice(11, 13); }
   else return null;
+  if (isSubdaily()) {
+    if (h) return `${y}-${m}-${d}T${h}:00`;
+    return toHourStr(d ? `${y}-${m}-${d}` : `${y}-${m}`, isEnd);
+  }
   if (timeFreq() !== "day") return `${y}-${m}`;
   return d ? `${y}-${m}-${d}` : toDayStr(`${y}-${m}`, isEnd);
 }
@@ -6735,7 +7057,19 @@ function gifTimes(start, end, step = 1) {
   const cap = gifMaxFrames();
   const out = [];
   step = Math.max(1, step | 0);
-  if (timeFreq() === "day") {
+  if (isSubdaily()) {
+    const lo = toHourStr(start, false), hi = toHourStr(end, true);
+    const eLo = toHourStr(exp.start, false), eHi = toHourStr(exp.end, true);
+    const first = lo < eLo ? eLo : lo, last = hi > eHi ? eHi : hi;
+    const d = new Date(`${first}:00Z`);
+    if (Number.isNaN(d.getTime())) return out;
+    while (out.length <= cap) {
+      const t = d.toISOString().slice(0, 16);
+      if (t > last) break;
+      out.push(t);
+      d.setUTCHours(d.getUTCHours() + step * stepHours());
+    }
+  } else if (timeFreq() === "day") {
     const lo = toDayStr(start, false), hi = toDayStr(end, true);
     const eLo = toDayStr(exp.start, false), eHi = toDayStr(exp.end, true);
     const first = lo < eLo ? eLo : lo, last = hi > eHi ? eHi : hi;
@@ -6768,6 +7102,13 @@ function gifTimes(start, end, step = 1) {
 function gifDefaultRange() {
   const exp = meta.experiments[state.experiment];
   const cur = el("month-input").value;
+  if (isSubdaily()) {  // five days of steps from the selected time
+    const s = toHourStr(cur || exp.start, false);
+    const d = new Date(`${s}:00Z`);
+    d.setUTCHours(d.getUTCHours() + 5 * 24 - stepHours());
+    const e = d.toISOString().slice(0, 16), eHi = toHourStr(exp.end, true);
+    return { start: s, end: e > eHi ? eHi : e };
+  }
   if (timeFreq() === "day") {
     const s = toDayStr(cur || exp.start, false);
     const d = new Date(`${s}T00:00:00Z`);
@@ -6797,11 +7138,12 @@ function gifToggleCard(open) {
   if (show && !meta) return;
   if (show) {
     const r = gifDefaultRange();
-    const daily = timeFreq() === "day";
+    const daily = timeFreq() === "day", sub = isSubdaily();
     for (const [id, v] of [["gif-start", r.start], ["gif-end", r.end]]) {
       const input = el(id);
-      input.placeholder = daily ? "YYYY-MM-DD" : "YYYY-MM";
-      input.title = `${daily ? "YYYY-MM-DD, YYYY-MM" : "YYYY-MM"} or just YYYY`;
+      input.placeholder = sub ? "YYYY-MM-DDTHH" : daily ? "YYYY-MM-DD" : "YYYY-MM";
+      input.maxLength = sub ? 16 : 10;
+      input.title = `${sub ? "YYYY-MM-DDTHH, YYYY-MM-DD, YYYY-MM" : daily ? "YYYY-MM-DD, YYYY-MM" : "YYYY-MM"} or just YYYY`;
       if (!input.value) input.value = v; // keep a range the user already typed
     }
   }
@@ -6814,13 +7156,13 @@ function gifToggleCard(open) {
 function gifRefreshNote() {
   const note = el("gif-note");
   if (!note || el("gif-card").hidden || !meta) return;
-  const daily = timeFreq() === "day";
-  const unit = daily ? "day" : "month";
+  const daily = timeFreq() === "day", sub = isSubdaily();
+  const unit = sub ? `${stepHours()}-h step` : daily ? "day" : "month";
   el("gif-stride-unit").textContent = `${unit}s`;
   const s = gifParseTime(el("gif-start").value, false), e = gifParseTime(el("gif-end").value, true);
   const step = gifStride(), cap = gifMaxFrames();
   let msg, bad = false;
-  if (!s || !e) { msg = `Type times as ${daily ? "YYYY-MM-DD" : "YYYY-MM"} (or just YYYY).`; bad = true; }
+  if (!s || !e) { msg = `Type times as ${sub ? "YYYY-MM-DDTHH" : daily ? "YYYY-MM-DD" : "YYYY-MM"} (or just YYYY).`; bad = true; }
   else if (e < s) { msg = "The end is before the start."; bad = true; }
   else {
     const times = gifTimes(s, e, step), n = times.length;
@@ -6943,7 +7285,7 @@ async function gifRun(kind) {
     times = gifTimes(box.range.start, box.range.end, step);
   } else {
     const s = gifParseTime(el("gif-start").value, false), e = gifParseTime(el("gif-end").value, true);
-    if (!s || !e) { setStatus(`GIF: type times as ${daily ? "YYYY-MM-DD" : "YYYY-MM"} (or just YYYY)`, true); return; }
+    if (!s || !e) { setStatus(`GIF: type times as ${isSubdaily() ? "YYYY-MM-DDTHH" : daily ? "YYYY-MM-DD" : "YYYY-MM"} (or just YYYY)`, true); return; }
     times = gifTimes(s, e, step);
   }
   const n = times.length;
@@ -7055,6 +7397,7 @@ async function gifRun(kind) {
     el("load-overlay").hidden = true;
     el("load-cancel").hidden = true;
     el("month-input").value = origTime;
+    updateLeadReadout();
     gif.busy = false;
     snap.busy = false;
     gifSetBusy(false);

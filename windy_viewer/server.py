@@ -243,6 +243,28 @@ def meta():
     }
 
 
+# "YYYY-MM", "YYYY-MM-DD" or "YYYY-MM-DDTHH" (an optional ":MM" from
+# datetime inputs is dropped): the string's precision selects the period.
+TIME_RX = r"^\d{4}-\d{2}(-\d{2}(T\d{2}(:\d{2})?)?)?$"
+
+
+def _norm_time(t: str) -> str:
+    return t[:13] if len(t) > 13 and "T" in t else t
+
+
+@app.get("/api/forecast/files")
+def forecast_files(experiment: str = Query(...), var: str = Query(...), dataset: str | None = Query(None)):
+    """The source NetCDF file per member behind one forecast's variable."""
+    src = _src(dataset)
+    if not hasattr(src, "source_files"):
+        raise HTTPException(400, f"dataset {src.id!r} is not a forecast catalog")
+    if var not in src.variables or experiment not in src.experiments:
+        raise HTTPException(400, "unknown variable or initialization")
+    e = src.experiments[experiment]
+    return {"dataset": src.id, "experiment": experiment, "var": var, "dir": e.get("dir_path", ""),
+            "files": src.source_files(experiment, var)}
+
+
 def _stat_token(stat: str, member: str) -> str:
     """Cache-key token for a (statistic, member) combination."""
     return {"raw": member, "mean": "ensmean", "spread": "ensspread"}.get(
@@ -372,12 +394,13 @@ def field(
     var: str = Query("pr"),
     experiment: str = Query("scenarioSSP5-85"),
     member: str = Query("r1i1p1f1"),
-    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}(-\d{2})?$"),
+    time: str = Query("2030-01", pattern=TIME_RX),
     plev: float | None = Query(None, gt=0),
     stat: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
     dataset: str | None = Query(None),
 ):
     src = _src(dataset)
+    time = _norm_time(time)
     ds = _open(src, experiment, var)
     if member == "ensmean" and stat == "raw":
         stat = "mean"  # back-compat with the pre-statistic API
@@ -435,7 +458,7 @@ def field(
 def wind(
     experiment: str = Query("scenarioSSP5-85"),
     member: str = Query("r1i1p1f1"),
-    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}(-\d{2})?$"),
+    time: str = Query("2030-01", pattern=TIME_RX),
     plev: float | None = Query(None, gt=0),
     dataset: str | None = Query(None),
 ):
@@ -443,6 +466,7 @@ def wind(
     near-surface (u, v) pair by default, or its pressure-level pair at the
     requested level (hPa). 404 when the dataset has no wind components."""
     src = _src(dataset)
+    time = _norm_time(time)
     pair = src.wind["plev"] if plev else src.wind["sfc"]
     if not pair:
         raise HTTPException(404, "this dataset has no wind components")
@@ -598,19 +622,20 @@ def download(
     var: str = Query("pr"),
     experiment: str = Query("scenarioSSP5-85"),
     member: str = Query("r1i1p1f1"),
-    time: str = Query("2030-01", pattern=r"^\d{4}-\d{2}(-\d{2})?$"),
+    time: str = Query("2030-01", pattern=TIME_RX),
     plev: float | None = Query(None, gt=0),
     stat: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
     compare: bool = Query(False),
     experiment_b: str = Query("scenarioSSP5-85"),
     member_b: str = Query("r2i1p1f1"),
-    time_b: str = Query("2030-01", pattern=r"^\d{4}-\d{2}(-\d{2})?$"),
+    time_b: str = Query("2030-01", pattern=TIME_RX),
     stat_b: str = Query("raw", pattern="^(raw|mean|spread|anom)$"),
     dataset: str | None = Query(None),
 ):
     """Download the currently-viewed subset (or A-B comparison) with
     descriptive metadata, in the store's native units and coordinates."""
     src = _src(dataset)
+    time, time_b = _norm_time(time), _norm_time(time_b)
     if member == "ensmean" and stat == "raw":
         stat = "mean"
     if member_b == "ensmean" and stat_b == "raw":

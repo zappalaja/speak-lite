@@ -139,7 +139,7 @@ body.panel-resizing .panel { transition: none; }
   color: var(--ink-2);
 }
 
-.row input[type="month"], .row input[type="date"] {
+.row input[type="month"], .row input[type="date"], .row input[type="datetime-local"] {
   background: #242423;
   color: var(--ink);
   border: 1px solid var(--border);
@@ -402,6 +402,36 @@ body.panel-resizing .panel { transition: none; }
   line-height: 1;
 }
 .month-controls button:hover { background: #2e2e2c; }
+/* forecast lead strip: one button per initialization covering the selected
+   valid time, labelled by its lead in whole months */
+/* dimension sliders (forecast datasets): one per axis, ncview-style —
+   arrows, a slider over the whole axis, the coordinate value underneath */
+.dim-line { display: flex; align-items: center; gap: 4px; width: 100%; }
+.dim-line input[type="range"] { flex: 1 1 auto; min-width: 0; margin: 0; accent-color: var(--accent); }
+.dim-line button {
+  background: #242423; color: var(--ink); border: 1px solid var(--border); border-radius: 6px;
+  width: 22px; height: 22px; font-size: 14px; line-height: 1; cursor: pointer; flex: 0 0 auto;
+}
+.dim-line button:hover { background: #2e2e2c; }
+.dim-readout { font-size: 11px; color: var(--ink-2); line-height: 1.3; width: 100%; }
+.dim-file { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.row.time-sub .step-line { margin-top: 2px; }
+/* sub-daily data: the row stacks (label / day picker / hour buttons); the
+   datetime-local input holds the canonical value and is only shown when the
+   data's hours do not fit a button row */
+.row.time-sub { flex-wrap: wrap; row-gap: 5px; }
+.row.time-sub .month-controls { flex: 0 0 auto; }
+.row.time-sub input[type="datetime-local"] { width: 150px; font-size: 12px; }
+.row.time-sub .hour-seg { width: 100%; }
+.hour-seg button { padding: 3px 4px; font-size: 12px; }
+.lead-readout { margin-left: 4px; }
+.lead-readout {
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  margin-left: 2px;
+}
 
 .row input[type="range"] {
   flex: 1 1 60px;
