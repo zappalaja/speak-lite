@@ -349,7 +349,13 @@
       <button type="button" id="cmap-btn" class="cmap-btn" title="Choose a colour scale"><canvas id="cmap-swatch" width="28" height="8"></canvas><span class="cmap-caret">&#9662;</span></button>
       <div class="legend-units" id="legend-units"></div>
     </div>
-    <div class="filter-title">Filter Values</div>
+    <div class="filter-title">Colour scale range</div>
+    <div class="filter-row">
+      <label>Min <input type="number" id="range-lo" step="any" placeholder="auto" title="Value shown with the first colour; values below take it too" /></label>
+      <label>Max <input type="number" id="range-hi" step="any" placeholder="auto" title="Value shown with the last colour; values above take it too" /></label>
+      <button type="button" id="range-clear" title="Back to the automatic range">&#10005;</button>
+    </div>
+    <div class="filter-title">Filter values</div>
     <div class="filter-row">
       <label>Above <input type="number" id="filter-lo" step="any" placeholder="&mdash;" /></label>
       <label>Below <input type="number" id="filter-hi" step="any" placeholder="&mdash;" /></label>

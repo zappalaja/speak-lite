@@ -407,6 +407,9 @@ body.panel-resizing .panel { transition: none; }
 /* dimension sliders (forecast datasets): one per axis, ncview-style —
    arrows, a slider over the whole axis, the coordinate value underneath */
 .dim-line { display: flex; align-items: center; gap: 4px; width: 100%; }
+/* display:flex would otherwise beat the hidden attribute: the forecast
+   step slider and hour buttons must vanish on datasets without them */
+.dim-line[hidden], .hour-seg[hidden], .dim-readout[hidden], .dim-file[hidden] { display: none; }
 .dim-line input[type="range"] { flex: 1 1 auto; min-width: 0; margin: 0; accent-color: var(--accent); }
 .dim-line button {
   background: #242423; color: var(--ink); border: 1px solid var(--border); border-radius: 6px;
@@ -416,7 +419,9 @@ body.panel-resizing .panel { transition: none; }
 .dim-readout { font-size: 11px; color: var(--ink-2); line-height: 1.3; width: 100%; }
 .dim-file { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px;
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
-.row.time-sub .step-line { margin-top: 2px; }
+/* the step slider sits under the picker on every dataset */
+#time-row, #time-row-b { flex-wrap: wrap; row-gap: 5px; }
+.step-line { margin-top: 2px; }
 /* sub-daily data: the row stacks (label / day picker / hour buttons); the
    datetime-local input holds the canonical value and is only shown when the
    data's hours do not fit a button row */
@@ -612,6 +617,8 @@ body.panel-resizing .panel { transition: none; }
   font-size: 11px;
 }
 .filter-row button:hover { color: var(--ink); }
+.filter-row button:disabled { opacity: 0.4; cursor: default; }
+.filter-row input.auto { color: var(--muted); } /* showing the automatic limit, not a pinned one */
 .legend-ticks {
   display: flex;
   justify-content: space-between;

@@ -420,7 +420,7 @@ function diffColor(v, limit, out) {
   return out;
 }
 
-function makeLUT(min, max, colorFn) {
+function makeLUT(min, max, colorFn, div = false) {
   const N = 1024;
   const data = new Uint8ClampedArray(N * 4);
   const rgba = [0, 0, 0, 0];
@@ -428,7 +428,46 @@ function makeLUT(min, max, colorFn) {
     colorFn(min + ((max - min) * i) / (N - 1), rgba);
     data.set(rgba, i * 4);
   }
-  return { min, max, scale: (N - 1) / (max - min), last: N - 1, data };
+  return { min, max, scale: (N - 1) / (max - min), last: N - 1, data, colorFn, div };
+}
+
+// -------------------------------------------------------- colour range
+// The user can pin the colour scale to a value range (state.range, BASE
+// units) instead of the automatic one, the usual "0 to 30 °C" request.
+// The palette is stretched so its first colour sits at the minimum and
+// its last at the maximum; values beyond either end take the end colour
+// (the painters clamp the LUT index). Diverging scales (A−B, deviation,
+// signed fields) stay centred on zero: the larger magnitude of the two
+// limits becomes the symmetric limit.
+function rangeActive() {
+  return state.range.lo != null || state.range.hi != null;
+}
+
+function rangedScale(min, max, colorFn, div) {
+  if (!rangeActive()) return { min, max, colorFn };
+  let lo = state.range.lo, hi = state.range.hi;
+  if (div) {
+    const L = Math.max(lo != null ? Math.abs(lo) : 0, hi != null ? Math.abs(hi) : 0);
+    if (!(L > 0)) return { min, max, colorFn };
+    lo = -L; hi = L;
+  } else {
+    if (lo == null) lo = min;
+    if (hi == null) hi = max;
+    if (!(hi > lo)) return { min, max, colorFn };
+  }
+  const k = (max - min) / (hi - lo);
+  const stretched = (v, out) => {
+    if (v == null || Number.isNaN(v)) return colorFn(v, out);
+    const m = min + (v - lo) * k;
+    return colorFn(m < min ? min : m > max ? max : m, out);
+  };
+  return { min: lo, max: hi, colorFn: stretched };
+}
+
+function rangedLUT(lut) {
+  if (!lut || !lut.colorFn || !rangeActive()) return lut;
+  const sc = rangedScale(lut.min, lut.max, lut.colorFn, lut.div);
+  return sc.colorFn === lut.colorFn ? lut : makeLUT(sc.min, sc.max, sc.colorFn, lut.div);
 }
 
 // Colour function for a diverging field (A−B, deviation): the built-in
@@ -447,7 +486,7 @@ function divColorFn(limit) {
 }
 
 function buildDiffLUT(limit) {
-  return makeLUT(-limit, limit, divColorFn(limit));
+  return rangedLUT(makeLUT(-limit, limit, divColorFn(limit), true));
 }
 
 // ---- dynamic (auto-scaled) colormaps for pressure-level fields
@@ -483,7 +522,7 @@ function buildDynamicLUT(f, cfg) {
     const [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
     const L = niceLimit(Math.max(Math.abs(lo), Math.abs(hi)));
     f._dyn = { min: -L, max: L, limit: L, div: true };
-    return makeLUT(-L, L, divColorFn(L));
+    return makeLUT(-L, L, divColorFn(L), true);
   }
   let [lo, hi] = samplePercentiles(f._grid, 0.02, 0.98);
   if (!(hi > lo)) hi = lo + 1;
@@ -498,9 +537,11 @@ function buildDynamicLUT(f, cfg) {
 // always dynamic-diverging (centered on zero); otherwise the variable's own.
 function lutForField(f) {
   const cfg = varConfigFor(f.var);
-  if (f.stat === "anom") return buildDynamicLUT(f, { dynamic: "div" });
-  if (f.stat === "spread") return buildDynamicLUT(f, { dynamic: "seq", ramp: "plasma" });
-  return cfg.dynamic ? buildDynamicLUT(f, cfg) : buildLUT(f.var);
+  let lut;
+  if (f.stat === "anom") lut = buildDynamicLUT(f, { dynamic: "div" });
+  else if (f.stat === "spread") lut = buildDynamicLUT(f, { dynamic: "seq", ramp: "plasma" });
+  else lut = cfg.dynamic ? buildDynamicLUT(f, cfg) : buildLUT(f.var);
+  return rangedLUT(lut); // the user's pinned range, if any, on top
 }
 
 function statPrefix(f) {
@@ -547,22 +588,35 @@ const MERC_LAT = 85.0511287798;
 const WORLD_COPIES = [-720, -360, 0, 360, 720];
 
 // ---------------------------------------------------------------- view URL
-// The selection and map view are mirrored into the query string so a link
-// reproduces a view: ?dataset=..&var=..&exp=..&member=..&stat=..&plev=..
-// &time=YYYY-MM&unit=..&compare=1&exp_b=..&member_b=..&stat_b=..&time_b=..
-// &lat=..&lon=..&z=..&globe=1 . URL values take precedence over the
-// browser's remembered state; unknown or malformed values are ignored.
+// The selection, map view and plot options are mirrored into the query
+// string so a link reproduces a plot: ?dataset=..&var=..&exp=..&member=..
+// &stat=..&plev=..&time=..&unit=..&compare=1&exp_b=..&member_b=..&stat_b=..
+// &time_b=..&lat=..&lon=..&z=..&globe=1&cells=1 plus the plot options,
+// which appear only when they differ from the defaults: op (overlay
+// opacity %), wind=0 (particles off), glat=0/glon=0 (graticule),
+// cmap/cmapd (palette), vmin/vmax (pinned colour range, base units),
+// c=1 (contours on) with cmode, cint,
+// clev, cby, ccol, cw, cop, clab, ccase, cband. A link describes the whole
+// plot: anything absent means the default, not this browser's remembered
+// option. Every value is checked here for type, range and shape (and
+// again against the dataset where it is applied); anything else is
+// ignored, so a crafted link can only ever pick among known options.
+const URL_TIME_RX = /^\d{4}-\d{2}(-\d{2}(T\d{2}(:\d{2})?)?)?$/; // month, day or hour
 const URL_VIEW = (() => {
   const q = new URLSearchParams(location.search);
   const out = {};
-  const str = (k) => (q.has(k) && q.get(k).trim() ? q.get(k).trim() : null);
-  const num = (k) => (q.has(k) && Number.isFinite(+q.get(k)) ? +q.get(k) : null);
+  const str = (k) => {
+    const v = q.has(k) ? q.get(k).trim() : "";
+    return v && v.length <= 200 ? v : null;
+  };
+  const num = (k) => (q.has(k) && q.get(k).trim() !== "" && Number.isFinite(+q.get(k)) ? +q.get(k) : null);
+  const bool = (k) => (q.get(k) === "1" ? true : q.get(k) === "0" ? false : null);
   for (const [qk, sk] of [["dataset", "dataset"], ["var", "var"], ["exp", "experiment"], ["member", "member"], ["stat", "stat"]]) {
     const v = str(qk); if (v) out[sk] = v;
   }
   if (num("plev") != null) out.plev = num("plev");
-  if (str("time") && /^\d{4}-\d{2}$/.test(str("time"))) out.timeA = str("time");
-  if (str("time_b") && /^\d{4}-\d{2}$/.test(str("time_b"))) out.timeB = str("time_b");
+  if (str("time") && URL_TIME_RX.test(str("time"))) out.timeA = str("time");
+  if (str("time_b") && URL_TIME_RX.test(str("time_b"))) out.timeB = str("time_b");
   if (q.has("compare")) out.compare = q.get("compare") === "1";
   if (q.has("cells")) out.cells = q.get("cells") === "1";
   if (str("exp_b") || str("member_b") || str("stat_b")) {
@@ -579,6 +633,28 @@ const URL_VIEW = (() => {
   }
   if (num("lat") != null && num("lon") != null) out.view = { lat: num("lat"), lon: num("lon"), z: num("z") };
   if (q.get("globe") === "1") out.globe = { open: true, lat0: num("lat"), lon0: num("lon") };
+  // plot options
+  if (num("op") != null && num("op") >= 0 && num("op") <= 100) out.opacity = String(Math.round(num("op")));
+  if (bool("wind") != null) out.particles = bool("wind");
+  if (bool("glat") != null || bool("glon") != null) out.grat = { lat: bool("glat") !== false, lon: bool("glon") !== false };
+  if (num("vmin") != null || num("vmax") != null) {
+    const lo = num("vmin"), hi = num("vmax");
+    if (lo == null || hi == null || lo < hi) out.range = { lo, hi };
+  }
+  if (bool("c")) {
+    const c = { on: true };
+    if (["auto", "interval", "custom"].includes(str("cmode"))) c.mode = str("cmode");
+    if (str("cint") && /^[0-9.eE+-]{1,24}$/.test(str("cint"))) c.interval = str("cint");
+    if (str("clev") && /^[0-9.eE+,\s-]{1,200}$/.test(str("clev"))) c.custom = str("clev");
+    if (["single", "value"].includes(str("cby"))) c.colorMode = str("cby");
+    if (str("ccol") && /^[0-9a-f]{6}$/i.test(str("ccol"))) c.color = `#${str("ccol").toLowerCase()}`;
+    if (num("cw") != null) c.width = num("cw");       // contoursRestore checks the ranges
+    if (num("cop") != null) c.opacity = num("cop") / 100;
+    for (const [k, sk] of [["clab", "labels"], ["ccase", "casing"], ["cband", "banded"]]) {
+      if (bool(k) != null) c[sk] = bool(k);
+    }
+    out.contours = c;
+  }
   return out;
 })();
 
@@ -785,8 +861,13 @@ const state = {
   // colour-scale choices from the legend picker, per variable: for the
   // plain field ("seq") and for compare / deviation ("div"); absent = default
   cmap: { seq: {}, div: {} },
+  // Colour-scale limits in BASE units (null = automatic: the variable's
+  // fixed stops or the field's 2nd–98th percentiles). Reset on variable,
+  // statistic and compare changes, where the scale changes meaning.
+  range: { lo: null, hi: null },
   // Display filter in BASE units (null = unbounded); values outside
-  // [lo, hi] render transparent. Session-only, reset on variable change.
+  // [lo, hi] render transparent. Independent of the colour range:
+  // session-only, reset with it.
   filter: { lo: null, hi: null },
 };
 
@@ -800,12 +881,13 @@ const SAVED = (() => {
     stored = JSON.parse(localStorage.getItem("spearViewer") || "null");
   } catch { /* storage unavailable */ }
   if (!Object.keys(URL_VIEW).length) return stored;
-  // A link describes the whole view: whatever it leaves out means the
+  // A link describes the whole plot: whatever it leaves out means the
   // defaults (so it looks the same for everyone), not this browser's
-  // remembered selection. Only display preferences carry over.
+  // remembered selection or options. Only the per-variable units and
+  // palettes of OTHER variables carry over; the linked variable's own
+  // are in the URL when they differ from the defaults.
   const base = stored || {};
-  const merged = { opacity: base.opacity, particles: base.particles, cells: base.cells, grat: base.grat,
-                   contours: base.contours, units: { ...(base.units || {}) }, cmap: base.cmap, ...URL_VIEW };
+  const merged = { units: { ...(base.units || {}) }, cmap: base.cmap, ...URL_VIEW };
   if (URL_VIEW.cmap) {
     const b = (base.cmap && typeof base.cmap.seq === "object") ? base.cmap : { seq: {}, div: {} };
     merged.cmap = { seq: { ...b.seq, ...URL_VIEW.cmap.seq }, div: { ...b.div, ...URL_VIEW.cmap.div } };
@@ -830,6 +912,29 @@ function syncUrl() {
   if (cmapOverride("seq")) q.set("cmap", cmapOverride("seq"));
   if (cmapOverride("div")) q.set("cmapd", cmapOverride("div"));
   if (state.cells) q.set("cells", "1");
+  // Plot options, only where they differ from the defaults: a plain link
+  // stays short and anything listed is a deliberate choice.
+  const urlNum = (x) => String(+(+x).toPrecision(6));
+  if (Math.round(+el("opacity").value) !== 100) q.set("op", String(Math.round(+el("opacity").value)));
+  if (!el("particles-toggle").checked) q.set("wind", "0");
+  if (!gratState.lat) q.set("glat", "0");
+  if (!gratState.lon) q.set("glon", "0");
+  if (state.range.lo != null) q.set("vmin", urlNum(state.range.lo));
+  if (state.range.hi != null) q.set("vmax", urlNum(state.range.hi));
+  if (typeof contours !== "undefined" && contours.on) {
+    const d = CONTOUR_DEFAULTS;
+    q.set("c", "1");
+    if (contours.mode !== d.mode) q.set("cmode", contours.mode);
+    if (contours.mode === "interval" && contours.interval !== d.interval) q.set("cint", contours.interval);
+    if (contours.mode === "custom" && contours.custom !== d.custom) q.set("clev", contours.custom);
+    if (contours.colorMode !== d.colorMode) q.set("cby", contours.colorMode);
+    if (contours.colorMode === "single" && contours.color !== d.color) q.set("ccol", contours.color.slice(1));
+    if (contours.width !== d.width) q.set("cw", urlNum(contours.width));
+    if (contours.opacity !== d.opacity) q.set("cop", String(Math.round(contours.opacity * 100)));
+    if (contours.labels !== d.labels) q.set("clab", contours.labels ? "1" : "0");
+    if (contours.casing !== d.casing) q.set("ccase", contours.casing ? "1" : "0");
+    if (contours.banded !== d.banded) q.set("cband", contours.banded ? "1" : "0");
+  }
   if (state.compare) {
     q.set("compare", "1");
     if (Object.keys(meta.experiments).length > 1) q.set("exp_b", state.b.experiment);
@@ -883,6 +988,7 @@ function saveState() {
       opacity: el("opacity").value,
       particles: el("particles-toggle").checked,
       cells: state.cells,
+      range: state.range,
       pins: (typeof pinnedPoints !== "undefined" ? pinnedPoints : []).map((p) => ({
         lat: p.latlng.lat,
         lng: p.latlng.lng,
@@ -1383,6 +1489,9 @@ function renderOverlay(d, lut, seq, filter) {
 
 // Legend value range in BASE units, kept for the filter handle math.
 let legendRange = { min: 0, max: 1 };
+// The automatic colour range (BASE units) the legend would span without a
+// pinned range: shown in the Min/Max boxes while they are not pinned.
+let autoRange = { min: null, max: null };
 
 // spec: {min, max, ticks, color(v, out), label, units}
 function renderLegend(spec) {
@@ -1411,12 +1520,15 @@ function renderLegend(spec) {
   el("legend-units").textContent = `${spec.label} (${spec.units})`;
   snapLegend = { ticks: spec.ticks.slice(), label: spec.label, units: spec.units };
   updateFilterUI();
+  updateRangeUI();
 }
 let snapLegend = null; // what the legend shows, for the PNG export's colour bar
 
 // -------------------------------------------------------- value filter
-// state.filter holds base-unit bounds; the legend handles and the numeric
-// inputs are two synchronized views of it.
+// state.filter holds base-unit bounds; the legend handles and the
+// Above/Below inputs are two synchronized views of it. Values outside
+// the bounds render transparent. The handles slide on whatever the
+// legend currently spans (the automatic or the pinned colour range).
 function filterSpec() {
   return unitSpecFor(currentDisplay ? currentDisplay.var : state.var);
 }
@@ -1478,6 +1590,7 @@ function initFilterControls() {
   for (const [id, which] of [["legend-handle-lo", "lo"], ["legend-handle-hi", "hi"]]) {
     el(id).addEventListener("pointerdown", (e) => {
       e.preventDefault();
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       const move = (ev) => {
         const r = bar.getBoundingClientRect();
         const frac = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
@@ -1502,14 +1615,82 @@ function initFilterControls() {
     const lo = el("filter-lo").value.trim();
     const hi = el("filter-hi").value.trim();
     setFilter(
-      lo === "" ? null : toBaseUnits(parseFloat(lo), spec),
-      hi === "" ? null : toBaseUnits(parseFloat(hi), spec),
+      lo === "" || !Number.isFinite(+lo) ? null : toBaseUnits(parseFloat(lo), spec),
+      hi === "" || !Number.isFinite(+hi) ? null : toBaseUnits(parseFloat(hi), spec),
       true
     );
   };
   el("filter-lo").addEventListener("change", readInputs);
   el("filter-hi").addEventListener("change", readInputs);
   el("filter-clear").addEventListener("click", () => setFilter(null, null, true));
+}
+
+// -------------------------------------------------------- colour range UI
+// The Min/Max boxes pin the colour scale (state.range, base units); the
+// legend then spans that range and the map's colour table is rebuilt on
+// it. Independent of the value filter above.
+// The boxes show the automatic limit (display units) while that limit is
+// not pinned, so the user sees what "auto" currently means and can edit
+// from it; typing the automatic value back is the same as unpinning.
+function rangeBoxText(baseVal, spec) {
+  return baseVal == null ? "" : String(+toDisplayUnits(baseVal, spec).toPrecision(4));
+}
+function autoRangeText(which, spec) {
+  return rangeBoxText(which === "lo" ? autoRange.min : autoRange.max, spec);
+}
+function updateRangeUI() {
+  const spec = filterSpec();
+  if (document.activeElement !== el("range-lo")) {
+    el("range-lo").value = state.range.lo == null ? autoRangeText("lo", spec) : rangeBoxText(state.range.lo, spec);
+  }
+  if (document.activeElement !== el("range-hi")) {
+    el("range-hi").value = state.range.hi == null ? autoRangeText("hi", spec) : rangeBoxText(state.range.hi, spec);
+  }
+  el("range-lo").classList.toggle("auto", state.range.lo == null);
+  el("range-hi").classList.toggle("auto", state.range.hi == null);
+  el("range-clear").disabled = !rangeActive();
+}
+
+// The colour range and the filter are both tied to one variable's scale.
+function resetRange() {
+  state.range = { lo: null, hi: null };
+  state.filter = { lo: null, hi: null };
+}
+
+// Rebuild the colour table on the (new) range and repaint everything that
+// shows it: legend, overlay, contours, globe. Playback frames were painted
+// on the old scale, so they are dropped like a palette change drops them.
+function applyRange() {
+  updateRangeUI();
+  saveState();
+  if (!currentDisplay) return;
+  if (playback.frames || playback.playing) discardPlayback();
+  currentLUT = currentDisplay.isDiff ? buildDiffLUT(currentDisplay.limit) : lutForField(currentField);
+  renderMeta();
+}
+
+function setRange(lo, hi) {
+  if (lo != null && hi != null && lo > hi) [lo, hi] = [hi, lo];
+  if (lo != null && hi != null && lo === hi) hi = null; // a zero-width scale is no scale
+  state.range.lo = lo;
+  state.range.hi = hi;
+  applyRange();
+}
+
+function initRangeControls() {
+  const readInputs = () => {
+    const spec = filterSpec();
+    const read = (which) => {
+      const txt = el(`range-${which}`).value.trim();
+      if (txt === "" || !Number.isFinite(+txt)) return null;
+      if (txt === autoRangeText(which, spec)) return null; // the automatic value = not pinned
+      return toBaseUnits(parseFloat(txt), spec);
+    };
+    setRange(read("lo"), read("hi"));
+  };
+  el("range-lo").addEventListener("change", readInputs);
+  el("range-hi").addEventListener("change", readInputs);
+  el("range-clear").addEventListener("click", () => setRange(null, null));
 }
 
 // -------------------------------------------------------- wind particles
@@ -2158,12 +2339,15 @@ function renderMeta() {
   if (!currentDisplay) return;
   const spec = unitSpecFor(currentDisplay.var);
   if (currentDisplay.isDiff) {
-    const L = currentDisplay.limit;
+    const L0 = currentDisplay.limit;
+    autoRange = { min: -L0, max: L0 };
+    const sc = rangedScale(-L0, L0, divColorFn(L0), true); // pinned range, if any
+    const L = sc.max;
     renderLegend({
       min: -L,
       max: L,
       ticks: [-L, -L / 2, 0, L / 2, L].map((t) => fmtTick(convDiff(t, spec))),
-      color: divColorFn(L),
+      color: sc.colorFn,
       label: currentDisplay.label,
       units: spec.unit,
     });
@@ -2190,6 +2374,12 @@ function renderMeta() {
         ? cfg.legend.ticks.filter((_, i) => i % 2 === 0)
         : cfg.legend.ticks;
       colorFn = fixedColorFn(cfg.stops);
+    }
+    autoRange = { min, max };
+    const sc = rangedScale(min, max, colorFn, !!(f._dyn && f._dyn.div));
+    if (sc.colorFn !== colorFn) {
+      ({ min, max, colorFn } = sc); // pinned range: the legend spans it, evenly ticked
+      tickVals = [0, 1, 2, 3, 4].map((i) => min + ((max - min) * i) / 4);
     }
     renderLegend({
       min,
@@ -2467,7 +2657,11 @@ function stepMonth(inputId, delta) {
     const d = new Date(Date.UTC(y, m - 1 + delta, 1));
     next = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
   }
-  if (next < input.min || next > input.max) return;
+  // Stay inside the experiment; from a value outside it (typed or linked)
+  // an arrow lands on the nearest end instead of doing nothing.
+  if (next < input.min) next = input.min;
+  if (next > input.max) next = input.max;
+  if (next === input.value) return;
   input.value = next;
   updateLeadReadout();
   loadField();
@@ -2496,7 +2690,7 @@ function leadText(h) {
   return `${sign}${Math.floor(a / 24)} d ${String(a % 24).padStart(2, "0")} h`;
 }
 function updateLeadReadout() {
-  if (isForecast()) syncDimSliders();
+  syncDimSliders();
   syncSubdailyControls();
   for (const [rid, iid, exp] of [["lead-readout", "month-input", state.experiment],
                                   ["lead-readout-b", "month-input-b", state.b.experiment]]) {
@@ -2573,18 +2767,60 @@ function applyInit(side, k) {
   if (side !== "b") { tsRange.start = ""; tsSetRangeDefaults(); }
 }
 // step index of `time` within the experiment's window (0-based), or null
+// Time steps of an experiment as 0-based indices, in the variable's
+// frequency: months, days or the sub-daily interval. Every dataset gets
+// the step slider; it is the same thing as the date picker.
 function stepIndexOf(time, experiment) {
-  const e = meta.experiments[experiment], h = stepHours();
-  if (!e || !h || !time) return null;
-  const t = Date.parse(`${toHourStr(time)}:00Z`), t0 = Date.parse(`${toHourStr(e.start)}:00Z`);
-  if (Number.isNaN(t) || Number.isNaN(t0)) return null;
-  return Math.round((t - t0) / (h * 3600000));
+  const e = meta.experiments[experiment];
+  if (!e || !time) return null;
+  if (isSubdaily()) {
+    const t = Date.parse(`${toHourStr(time)}:00Z`), t0 = Date.parse(`${toHourStr(e.start)}:00Z`);
+    if (Number.isNaN(t) || Number.isNaN(t0)) return null;
+    return Math.round((t - t0) / (stepHours() * 3600000));
+  }
+  if (timeFreq() === "day") {
+    const t = Date.parse(`${toHourStr(time).slice(0, 10)}T00:00:00Z`);
+    const t0 = Date.parse(`${toHourStr(e.start).slice(0, 10)}T00:00:00Z`);
+    if (Number.isNaN(t) || Number.isNaN(t0)) return null;
+    return Math.round((t - t0) / 86400000);
+  }
+  const [y, m] = time.slice(0, 7).split("-").map(Number);
+  const [y0, m0] = e.start.slice(0, 7).split("-").map(Number);
+  if (![y, m, y0, m0].every(Number.isFinite)) return null;
+  return (y - y0) * 12 + (m - m0);
+}
+function stepCount(experiment) {
+  const e = meta.experiments[experiment];
+  if (!e) return 1;
+  if (isForecast() && e.n_times) return e.n_times;
+  // a month-stamped end of daily data means that month's last day
+  const last = stepIndexOf(timeFreq() === "month" ? e.end : toHourStr(e.end, true), experiment);
+  return Math.max(1, (last ?? 0) + 1);
 }
 function timeAtStep(experiment, i) {
   const e = meta.experiments[experiment];
-  const d = new Date(`${toHourStr(e.start)}:00Z`);
-  d.setUTCHours(d.getUTCHours() + Math.max(0, Math.min(e.n_times - 1, i)) * stepHours());
-  return d.toISOString().slice(0, 16);
+  i = Math.max(0, Math.min(stepCount(experiment) - 1, i));
+  if (isSubdaily()) {
+    const d = new Date(`${toHourStr(e.start)}:00Z`);
+    d.setUTCHours(d.getUTCHours() + i * stepHours());
+    return d.toISOString().slice(0, 16);
+  }
+  if (timeFreq() === "day") {
+    const d = new Date(`${toHourStr(e.start).slice(0, 10)}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + i);
+    return d.toISOString().slice(0, 10);
+  }
+  const [y0, m0] = e.start.slice(0, 7).split("-").map(Number);
+  const d = new Date(Date.UTC(y0, m0 - 1 + i, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+// "step 3 of 1128 · 2021-03" (monthly), "… · 2021-03-15" (daily),
+// "… · 2021-03-15 06 UTC · lead +0 d 03 h" (forecast / sub-daily).
+function stepReadoutText(experiment, i, time) {
+  const n = stepCount(experiment);
+  let when = isSubdaily() ? `${t13(time).replace("T", " ")} UTC` : timeFreq() === "day" ? toHourStr(time).slice(0, 10) : time.slice(0, 7);
+  if (isForecast()) when += ` · lead ${leadText(leadHours(time, experiment))}`;
+  return `step ${i + 1} of ${n} · ${when}`;
 }
 // Move one side to another initialization, keeping the step index.
 function gotoInit(side, k) {
@@ -2609,27 +2845,31 @@ function gotoStep(side, i) {
   updateLeadReadout();
   loadField();
 }
-// Set both sliders from the current state (called on every change).
+// Set the sliders from the current state (called on every change): the
+// step slider on every dataset, the initialization slider on forecasts.
 function syncDimSliders() {
+  if (!meta) return;
+  const fcst = isForecast();
   const ids = initIds();
   for (const side of ["a", "b"]) {
     const sfx = side === "b" ? "-b" : "";
     const cur = side === "b" ? state.b.experiment : state.experiment;
-    const e = meta.experiments[cur];
     const time = el(`month-input${sfx}`).value;
     const ir = el(`init-range${sfx}`), sr = el(`step-range${sfx}`);
-    ir.max = String(Math.max(0, ids.length - 1));
-    ir.value = String(Math.max(0, ids.indexOf(cur)));
-    el(`init-readout${sfx}`).textContent = `${initReadoutText(cur)} · ${ids.indexOf(cur) + 1} of ${ids.length}`;
-    updateSourceFileNote(side);
-    const n = (e && e.n_times) || 1;
+    if (fcst) {
+      ir.max = String(Math.max(0, ids.length - 1));
+      ir.value = String(Math.max(0, ids.indexOf(cur)));
+      el(`init-readout${sfx}`).textContent = `${initReadoutText(cur)} · ${ids.indexOf(cur) + 1} of ${ids.length}`;
+      updateSourceFileNote(side);
+    }
+    const n = stepCount(cur);
     sr.max = String(n - 1);
-    const i = stepIndexOf(time, cur) ?? 0;
+    const i = Math.max(0, Math.min(n - 1, stepIndexOf(time, cur) ?? 0));
     sr.value = String(i);
     el(`step-line${sfx}`).hidden = false;
     const ro = el(`step-readout${sfx}`);
     ro.hidden = false;
-    ro.textContent = `step ${i + 1} of ${n} · ${t13(time).replace("T", " ")} UTC · lead ${leadText(leadHours(time, cur))}`;
+    ro.textContent = stepReadoutText(cur, i, time);
     if (!ir.dataset.wired) {
       ir.dataset.wired = "1";
       ir.addEventListener("input", () => {        // live readout while dragging
@@ -2639,10 +2879,9 @@ function syncDimSliders() {
       ir.addEventListener("change", () => gotoInit(side, initIds()[+ir.value]));
       el(`init-prev${sfx}`).addEventListener("click", () => gotoInit(side, initIds()[Math.max(0, +ir.value - 1)]));
       el(`init-next${sfx}`).addEventListener("click", () => gotoInit(side, initIds()[Math.min(initIds().length - 1, +ir.value + 1)]));
-      sr.addEventListener("input", () => {
+      sr.addEventListener("input", () => {        // live readout while dragging
         const c = side === "b" ? state.b.experiment : state.experiment;
-        const t = timeAtStep(c, +sr.value);
-        ro.textContent = `step ${+sr.value + 1} of ${sr.max | 0 + 1} · ${t13(t).replace("T", " ")} UTC · lead ${leadText(leadHours(t, c))}`;
+        ro.textContent = stepReadoutText(c, +sr.value, timeAtStep(c, +sr.value));
       });
       sr.addEventListener("change", () => gotoStep(side, +sr.value));
       el(`step-prev${sfx}`).addEventListener("click", () => gotoStep(side, +sr.value - 1));
@@ -2946,7 +3185,7 @@ function buildVarButtons() {
     if (state.var === k) return;
     const v = meta.variables[k];
     state.var = k;
-    state.filter = { lo: null, hi: null }; // filter bounds are per-variable
+    resetRange(); // a colour range is per-variable
     syncTimeInputs(); // the new variable may be daily where the old was monthly
     // variables of one dataset can cover different periods
     const mi = el("month-input");
@@ -3219,6 +3458,15 @@ async function init() {
   el("compare-toggle").checked = state.compare;
   if (SAVED && SAVED.contours) contoursRestore(SAVED.contours);
   contoursInitUI();
+  // A pinned colour range only means something for the selection it was
+  // set on (same variable, statistic and compare mode).
+  if (SAVED && SAVED.range && typeof SAVED.range === "object" && SAVED.var === state.var
+      && (SAVED.stat || "raw") === state.stat && !!SAVED.compare === state.compare) {
+    const lo = Number.isFinite(SAVED.range.lo) ? SAVED.range.lo : null;
+    const hi = Number.isFinite(SAVED.range.hi) ? SAVED.range.hi : null;
+    if (lo == null || hi == null || lo < hi) state.range = { lo, hi };
+  }
+
   if (SAVED && SAVED.box && ["south", "north", "west", "east"].every((k) => Number.isFinite(SAVED.box[k]))) {
     box.range.start = typeof SAVED.box.start === "string" ? SAVED.box.start : "";
     box.range.end = typeof SAVED.box.end === "string" ? SAVED.box.end : "";
@@ -3237,13 +3485,13 @@ async function init() {
   };
   buildSeg("stat-seg", STAT_OPTS, state.stat, (v) => {
     state.stat = v;
-    state.filter = { lo: null, hi: null }; // scales differ between statistics
+    resetRange(); // scales differ between statistics
     updateControlStates();
     loadField();
   }, STAT_INFO);
   buildSeg("stat-seg-b", STAT_OPTS, state.b.stat, (v) => {
     state.b.stat = v;
-    state.filter = { lo: null, hi: null };
+    resetRange();
     updateControlStates();
     loadField();
   }, STAT_INFO);
@@ -3284,7 +3532,7 @@ async function init() {
   el("next-month-b").addEventListener("click", () => stepMonth("month-input-b", 1));
   el("compare-toggle").addEventListener("change", (e) => {
     state.compare = e.target.checked;
-    state.filter = { lo: null, hi: null }; // diff scale differs from absolute
+    resetRange(); // diff scale differs from absolute
     updateControlStates();
     loadField();
   });
@@ -3353,6 +3601,7 @@ async function init() {
     restoreTsJobs(SAVED); // async; thumbnails/cards appear when validated
   }
   initFilterControls();
+  initRangeControls();
   initParticleCanvas();
   initCellsCanvas();
   loadBorders();
@@ -3777,7 +4026,7 @@ function commonLUTFor(fields) {
     }
     L = niceLimit(L);
     for (const f of fields) f._dyn = { min: -L, max: L, limit: L, div: true };
-    return makeLUT(-L, L, (v, out) => diffColor(v, L, out));
+    return rangedLUT(makeLUT(-L, L, (v, out) => diffColor(v, L, out), true));
   }
   if (dynMode === "seq") {
     let lo = Infinity, hi = -Infinity;
@@ -3789,9 +4038,9 @@ function commonLUTFor(fields) {
     if (!(hi > lo)) hi = lo + 1;
     const ramp = cmapOverride("seq") || (fields[0].stat === "spread" ? "plasma" : cfg.ramp);
     for (const f of fields) f._dyn = { min: lo, max: hi, ramp };
-    return makeLUT(lo, hi, (v, out) => rampColor(ramp, (v - lo) / (hi - lo), 0.88, out));
+    return rangedLUT(makeLUT(lo, hi, (v, out) => rampColor(ramp, (v - lo) / (hi - lo), 0.88, out)));
   }
-  return buildLUT(state.var);
+  return rangedLUT(buildLUT(state.var));
 }
 
 async function startPlayback(resume) {
@@ -3824,7 +4073,7 @@ async function startPlayback(resume) {
     (isPlev ? " on the selected pressure level" : "") +
     ".<br>Cached months are instant; progress is real.";
   el("load-cancel").hidden = false;
-  const withWind = el("particles-toggle").checked;
+  const withWind = el("particles-toggle").checked && hasWind(); // datasets without wind play the field alone
   const total = months.length * (withWind ? 2 : 1);
   let done = 0;
   const bump = () => { el("load-pct").textContent = `${Math.round((++done / total) * 90)}%`; };
@@ -4803,7 +5052,7 @@ function tsShowProgress() {
   el("load-title").textContent = "Extracting time series…";
   el("load-pct").textContent = "0%";
   el("load-note").innerHTML =
-    "Reading one data chunk per month from the cloud store" +
+    "Reading one data chunk per time step" +
     (state.stat !== "raw" ? ` (×${meta.n_members} members for ensemble statistics)` : "") +
     ".<br>Progress shown is real, not estimated.";
   el("load-cancel").hidden = false;
@@ -5851,8 +6100,7 @@ function boxShowProgress(r) {
   el("load-title").textContent = "Extracting box subset…";
   el("load-pct").textContent = "0%";
   el("load-note").innerHTML =
-    `${r.cells.toLocaleString()} grid cells × ${r.months} month${r.months === 1 ? "" : "s"}. ` +
-    "Reading one data chunk per month from the cloud store" +
+    `${r.cells.toLocaleString()} grid cells × ${r.months} time step${r.months === 1 ? "" : "s"}` +
     (state.stat !== "raw" ? ` (×${meta.n_members} members for ensemble statistics)` : "") +
     ".<br>Progress shown is real, not estimated.";
   el("load-cancel").hidden = false;
@@ -5981,7 +6229,7 @@ el("box-info").title = BOX_INFO_TEXT;
 // base units; the field is contoured as loaded (the value filter does
 // not apply). Lines are cached on the field object per level set, so
 // playback frames are contoured once.
-const contours = {
+const CONTOUR_DEFAULTS = {
   on: false,
   mode: "auto",        // auto | interval | custom
   interval: "",        // display units, as typed
@@ -5993,6 +6241,9 @@ const contours = {
   casing: true,        // dark outline under each line so it reads over any fill
   banded: true,        // flat fill colour between levels (filled-contour look)
   labels: true,
+};
+const contours = {
+  ...CONTOUR_DEFAULTS,
   levels: [],          // [{value (base), display, color, lines: [[[lat, lon], ...], ...]}]
   layer: null,         // L.layerGroup of lines on the map
   labelLayer: null,    // L.layerGroup of value labels for the current view

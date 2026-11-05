@@ -367,6 +367,31 @@ def _load_da(da: xr.DataArray) -> xr.DataArray:
     raise HTTPException(503, f"data store temporarily unreachable: {last}")
 
 
+def _bounds_vars(ds: xr.Dataset, da: xr.DataArray) -> dict[str, xr.DataArray]:
+    """The CF bounds variables (time_bnds, lat_bnds, lon_bnds, ...) that da's
+    coordinates point at via their `bounds` attribute, subset to da's
+    coordinate values and loaded, ready to be written next to da. (A
+    coordinate whose bounds the store does not carry keeps its attribute
+    here; _to_netcdf_bytes drops dangling ones at write time.)"""
+    out = {}
+    for cname in ("time", "lat", "lon"):
+        if cname not in da.coords:
+            continue
+        bname = da[cname].attrs.get("bounds")
+        if not bname or bname not in ds or cname not in ds[bname].dims or cname not in ds[bname].coords:
+            continue
+        try:
+            b = ds[bname].sel({cname: da[cname].values})
+            b = _load_da(b.drop_vars([c for c in b.coords if c not in b.dims]))
+        except Exception:  # noqa: BLE001  bounds are a courtesy, never a failure
+            continue
+        b.encoding = {}
+        for c in b.coords.values():
+            c.encoding = {k: v for k, v in c.encoding.items() if k in ("units", "calendar", "dtype")}
+        out[bname] = b
+    return out
+
+
 def _round_sig(vals: np.ndarray, sig: int = 5) -> np.ndarray:
     """Round to significant digits, not fixed decimals — fixed 2-decimal
     rounding destroyed small-magnitude fields (hus ~0.005 kg/kg)."""
@@ -576,6 +601,11 @@ def _to_netcdf_bytes(ds_out: xr.Dataset) -> bytes:
     # not valid HDF5 and the write fails. (netcdf4 engine: h5netcdf needs
     # h5py.)
     Path(path).unlink()
+    # A `bounds` attribute must name a variable in this file: drop the
+    # pointer where the source store carries none (e.g. forecast catalogs).
+    for v in ds_out.variables.values():
+        if "bounds" in v.attrs and v.attrs["bounds"] not in ds_out.variables:
+            v.attrs.pop("bounds")
     try:
         ds_out.to_netcdf(path, engine="netcdf4")
         return Path(path).read_bytes()
@@ -661,6 +691,7 @@ def download(
         ds_out = xr.Dataset(
             {f"{var}_diff": diff, f"{var}_a": a_vals, f"{var}_b": b_vals}
         )
+        ds_out.update(_bounds_vars(_open(src, experiment, var), a_vals))  # lat/lon bounds
         same_exp = experiment == experiment_b
         base = src.download_attrs(experiment, var, include_experiment=same_exp)
         extra = {
@@ -688,6 +719,7 @@ def download(
         )
     else:
         ds_out = da_a.to_dataset(name=var)
+        ds_out.update(_bounds_vars(_open(src, experiment, var), da_a))
         ds_out.attrs = _global_attrs(src, var, src.download_attrs(experiment, var), {
             "selection": _sel_text(src, experiment, member, time, da_a, stat),
             "statistic": src.stat_text(stat, member),
@@ -1209,9 +1241,17 @@ def _run_box_job(job_id: str, p: dict):
             job["progress"] = min(0.97, (b0 + len(batch)) / len(months))
         da = xr.concat(parts, dim="time") if len(parts) > 1 else parts[0]
         da = da.transpose("time", "lat", "lon")
+        bounds = _bounds_vars(ds, da)
         if wrap:
             lon = da.lon.values.astype(float)
-            da = da.assign_coords(lon=("lon", ((lon + 180) % 360) - 180, dict(da.lon.attrs)))
+            new_lon = ((lon + 180) % 360) - 180
+            da = da.assign_coords(lon=("lon", new_lon, dict(da.lon.attrs)))
+            lb = da.lon.attrs.get("bounds")
+            if lb in bounds:
+                # keep each cell's width: shift the bounds by the same amount as its centre
+                b = bounds[lb].transpose("lon", ...)
+                vals = new_lon[:, None] + (b.values.astype(float) - lon[:, None])
+                bounds[lb] = b.copy(data=vals).assign_coords(lon=da.lon)
         da.attrs["long_name"] = src.stat_long_name(stat, p["member"], da.attrs.get("long_name", p["var"]))
         # Store-specific encodings (zarr chunks/compressors) must not leak
         # into the NetCDF writer; keep only the calendar encoding of time.
@@ -1219,7 +1259,7 @@ def _run_box_job(job_id: str, p: dict):
         for c in da.coords.values():
             keep = {k: v for k, v in c.encoding.items() if k in ("units", "calendar", "dtype")}
             c.encoding = keep
-        job["result"] = {"da": da, "params": p, "wrap": wrap}
+        job["result"] = {"da": da, "params": p, "wrap": wrap, "bounds": bounds}
         job["progress"] = 1.0
         job["done"] = True
     except Exception as e:
@@ -1356,6 +1396,7 @@ def box_data(job_id: str, format: str = Query("nc", pattern="^(nc|csv)$")):
             f"_{p['start']}_{p['end']}{lev_suffix}")
     if format == "nc":
         ds_out = da.to_dataset(name=var)
+        ds_out.update(r.get("bounds") or {})
         ds_out.attrs = attrs
         body = _to_netcdf_bytes(ds_out)
         return Response(body, media_type="application/x-netcdf",
